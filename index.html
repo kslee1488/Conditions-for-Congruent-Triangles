@@ -166,8 +166,11 @@
     <div id="view-quiz" class="w-full flex flex-col gap-6 hidden">
       <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center">
         <div class="font-semibold text-lg text-slate-700">Player: <span class="text-blue-600" id="quiz-display-name"></span> <span id="quiz-display-diff" class="text-sm bg-slate-100 px-2 py-1 rounded ml-2"></span></div>
-        <div class="font-bold text-xl text-slate-800">
-          Score: <span class="text-emerald-600" id="quiz-score">0</span> <span class="text-slate-400 font-normal text-lg" id="quiz-attempts">/ 0</span>
+        <div class="flex items-center gap-4">
+          <div class="font-bold text-xl text-slate-800">
+            Score: <span class="text-emerald-600" id="quiz-score">0</span> <span class="text-slate-400 font-normal text-lg" id="quiz-attempts">/ 0</span>
+          </div>
+          <button onclick="handleSubmitScore()" id="btn-submit-score" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold rounded-lg shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Save Score</button>
         </div>
       </div>
 
@@ -1119,6 +1122,47 @@
       }
       updateUI();
       triggerQuizAnimation(isCorrect, false);
+    };
+
+    window.handleSubmitScore = () => {
+      const btn = document.getElementById('btn-submit-score');
+      const originalText = btn.innerText;
+      btn.innerText = 'Saving...';
+      btn.disabled = true;
+
+      // Deployed Google Apps Script Web App URL
+      const scriptURL = "https://script.google.com/macros/s/AKfycbwFMKOLJ-Wf6ITtCRHxPNDK4RHFEYUhblSLiJ8eUoShCe46hPPZ6KStJ30Jhi_TFLc/exec"; 
+      
+      const payload = {
+        name: state.userName,
+        mode: state.quizDifficulty,
+        score: state.score,
+        attempts: state.attempts
+      };
+
+      // Sending data as 'text/plain' circumvents CORS preflight errors in modern browsers hitting Apps Script
+      fetch(scriptURL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+      })
+      .then(response => {
+        btn.innerText = 'Saved!';
+        btn.classList.replace('bg-indigo-600', 'bg-emerald-600');
+        btn.classList.replace('hover:bg-indigo-700', 'hover:bg-emerald-700');
+        
+        setTimeout(() => {
+          btn.innerText = originalText;
+          btn.disabled = false;
+          btn.classList.replace('bg-emerald-600', 'bg-indigo-600');
+          btn.classList.replace('hover:bg-emerald-700', 'hover:bg-indigo-700');
+        }, 3000);
+      })
+      .catch(error => {
+        console.error('Error:', error);
+        btn.innerText = 'Error! Try Again';
+        btn.disabled = false;
+      });
     };
 
     // Initial render
