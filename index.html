@@ -807,7 +807,10 @@ export default function App() {
         score: newScore,
         attempts: newAttempts
       })
-    }).catch(error => console.error('Error saving score:', error));
+    })
+    .then(res => res.json())
+    .then(data => console.log('Score updated in background:', data))
+    .catch(error => console.error('Error saving score:', error));
 
     // Start the identical Prove Congruence animation sequence for Quiz Mode
     triggerQuizAnimation(isCorrect, false);
