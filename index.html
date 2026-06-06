@@ -1,1402 +1,1381 @@
-import React, { useState, useMemo } from 'react';
-import { Layers, Info, Settings2, AlertTriangle, CheckCircle2, RefreshCw, ArrowRight } from 'lucide-react';
-
-const CONDITIONS = {
-  SSS: {
-    id: 'SSS',
-    title: 'Side-Side-Side (SSS)',
-    desc: 'If three sides of one triangle are equal to three sides of another triangle, the triangles are congruent.',
-    details: 'Because all three side lengths are fixed, the shape is completely locked. There is only one possible triangle that can be formed.'
-  },
-  SAS: {
-    id: 'SAS',
-    title: 'Side-Angle-Side (SAS)',
-    desc: 'If two sides and the included angle of one triangle are equal to the corresponding parts of another, they are congruent.',
-    details: 'The included angle acts like a hinge locked in place. With the lengths of the two arms also fixed, the third side can only have one specific length.'
-  },
-  ASA: {
-    id: 'ASA',
-    title: 'Angle-Side-Angle (ASA)',
-    desc: 'If two angles and the included side of one triangle are equal to the corresponding parts of another, they are congruent.',
-    details: 'By locking the base side and the exact trajectory of the other two sides (the angles), they can only intersect at one specific point.'
-  },
-  AAS: {
-    id: 'AAS',
-    title: 'Angle-Angle-Side (AAS)',
-    desc: 'If two angles and a non-included side of one triangle are equal to the corresponding parts of another, they are congruent.',
-    details: 'Knowing two angles means you know the third (they add up to 180°). This essentially turns it into an ASA condition, locking the shape perfectly.'
-  },
-  RHS: {
-    id: 'RHS',
-    title: 'Right angle-Hypotenuse-Side (RHS)',
-    desc: 'If the hypotenuse and one side of a right-angled triangle are equal to the corresponding parts of another, they are congruent.',
-    details: 'The Pythagorean theorem states a² + b² = c². If you lock the hypotenuse (c), one side (a), and the right angle, the third side (b) is mathematically forced to be exactly one length.'
-  }
-};
-
-// Math Helpers
-const pushOut = (pt, center, dist) => {
-  const dx = pt.x - center.x;
-  const dy = pt.y - center.y;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return pt;
-  return { x: pt.x + (dx / len) * dist, y: pt.y + (dy / len) * dist };
-};
-
-const pushIn = (pt, center, dist) => {
-  const dx = center.x - pt.x;
-  const dy = center.y - pt.y;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return pt;
-  return { x: pt.x + (dx / len) * dist, y: pt.y + (dy / len) * dist };
-};
-
-const getCentroid = (A, B, C) => {
-  return {
-    x: (A.x + B.x + C.x) / 3,
-    y: (A.y + B.y + C.y) / 3
-  };
-};
-
-const getCircumcenter = (A, B, C) => {
-  const D = 2 * (A.x * (B.y - C.y) + B.x * (C.y - A.y) + C.x * (A.y - B.y));
-  if (Math.abs(D) < 0.001) return { x: 0, y: 0 }; // Collinear fallback
-  const Ux = ((A.x*A.x + A.y*A.y) * (B.y - C.y) + (B.x*B.x + B.y*B.y) * (C.y - A.y) + (C.x*C.x + C.y*C.y) * (A.y - B.y)) / D;
-  const Uy = ((A.x*A.x + A.y*A.y) * (C.x - B.x) + (B.x*B.x + B.y*B.y) * (A.x - C.x) + (C.x*C.x + C.y*C.y) * (B.x - A.x)) / D;
-  return { x: Ux, y: Uy };
-};
-
-const rotatePoint = (pt, center, angleDeg) => {
-  const rad = angleDeg * Math.PI / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  const dx = pt.x - center.x;
-  const dy = pt.y - center.y;
-  return {
-    x: center.x + dx * cos - dy * sin,
-    y: center.y + dx * sin + dy * cos
-  };
-};
-
-const reflectPointAcrossBisector = (pt, P1, P2) => {
-  const Mx = (P1.x + P2.x) / 2;
-  const My = (P1.y + P2.y) / 2;
-  const a = P2.x - P1.x;
-  const b = P2.y - P1.y;
-  const c = -(a * Mx + b * My);
-  const denom = a*a + b*b;
-  if (denom < 0.001) return pt;
-  const d = (a * pt.x + b * pt.y + c) / denom;
-  return {
-    x: pt.x - 2 * a * d,
-    y: pt.y - 2 * b * d
-  };
-};
-
-// Math Helper for flipping across a specific defined line
-const reflectPointAcrossLine = (pt, L1, L2) => {
-  const dx = L2.x - L1.x;
-  const dy = L2.y - L1.y;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return pt;
-  const nx = -dy / len;
-  const ny = dx / len;
-  const dist = (pt.x - L1.x) * nx + (pt.y - L1.y) * ny;
-  return {
-    x: pt.x - 2 * dist * nx,
-    y: pt.y - 2 * dist * ny
-  };
-};
-
-const dir = (p1, p2) => {
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return { x: 0, y: 0 };
-  return { x: dx / len, y: dy / len };
-};
-
-const buildTriangleData = (activeTab, params) => {
-  let A = { x: 50, y: 300 };
-  let B = { x: 50, y: 300 };
-  let C = { x: 50, y: 300 };
-  let valid = true;
-  let features = {
-    sideAB: { h: false, label: '', letter: '' },
-    sideBC: { h: false, label: '', letter: '' },
-    sideCA: { h: false, label: '', letter: '' },
-    angA: { h: false, label: '', letter: '' },
-    angB: { h: false, label: '', letter: '' },
-    angC: { h: false, label: '', letter: '' },
-    isRightA: false
-  };
-
-  if (activeTab === 'SSS') {
-    const { a, b, c } = params;
-    if (a + b <= c || a + c <= b || b + c <= a) valid = false;
-    B = { x: A.x + c, y: A.y };
-    const Cx = (c * c + b * b - a * a) / (2 * c);
-    const Cy = -Math.sqrt(Math.max(0, b * b - Cx * Cx));
-    C = { x: A.x + Cx, y: A.y + Cy };
-    features.sideAB = { h: true, label: c, letter: 'S' };
-    features.sideBC = { h: true, label: a, letter: 'S' };
-    features.sideCA = { h: true, label: b, letter: 'S' };
-  } 
-  else if (activeTab === 'SAS') {
-    const { s1, ang, s2 } = params;
-    B = { x: A.x + s1, y: A.y };
-    C = { 
-      x: A.x + s2 * Math.cos(ang * Math.PI / 180), 
-      y: A.y - s2 * Math.sin(ang * Math.PI / 180) 
-    };
-    features.sideAB = { h: true, label: s1, letter: 'S' };
-    features.angA = { h: true, label: ang + '°', letter: 'A' };
-    if (ang === 90) features.isRightA = true;
-    features.sideCA = { h: true, label: s2, letter: 'S' };
-  } 
-  else if (activeTab === 'ASA') {
-    const { ang1, s, ang2 } = params;
-    const ang3 = 180 - ang1 - ang2;
-    if (ang3 <= 0) valid = false;
-    const b = s * Math.sin(ang2 * Math.PI / 180) / Math.sin(ang3 * Math.PI / 180);
-    B = { x: A.x + s, y: A.y };
-    C = { 
-      x: A.x + b * Math.cos(ang1 * Math.PI / 180), 
-      y: A.y - b * Math.sin(ang1 * Math.PI / 180) 
-    };
-    features.sideAB = { h: true, label: s, letter: 'S' };
-    features.angA = { h: true, label: ang1 + '°', letter: 'A' };
-    if (ang1 === 90) features.isRightA = true;
-    features.angB = { h: true, label: ang2 + '°', letter: 'A' };
-  } 
-  else if (activeTab === 'AAS') {
-    const { ang1, ang2, s } = params;
-    const ang3 = 180 - ang1 - ang2;
-    if (ang3 <= 0) valid = false;
-    const b = s * Math.sin(ang2 * Math.PI / 180) / Math.sin(ang1 * Math.PI / 180);
-    const c = s * Math.sin(ang3 * Math.PI / 180) / Math.sin(ang1 * Math.PI / 180);
-    B = { x: A.x + c, y: A.y };
-    C = { 
-      x: A.x + b * Math.cos(ang1 * Math.PI / 180), 
-      y: A.y - b * Math.sin(ang1 * Math.PI / 180) 
-    };
-    features.angA = { h: true, label: ang1 + '°', letter: 'A' };
-    if (ang1 === 90) features.isRightA = true;
-    features.angB = { h: true, label: ang2 + '°', letter: 'A' };
-    features.sideBC = { h: true, label: s, letter: 'S' };
-  } 
-  else if (activeTab === 'RHS') {
-    const { hyp, leg } = params;
-    if (hyp <= leg) valid = false;
-    B = { x: A.x + leg, y: A.y };
-    const leg2 = Math.sqrt(Math.max(0, hyp * hyp - leg * leg));
-    C = { x: A.x, y: A.y - leg2 };
-    features.isRightA = true;
-    features.angA = { h: true, label: '90°', letter: 'R' };
-    features.sideAB = { h: true, label: leg, letter: 'S' };
-    features.sideBC = { h: true, label: hyp, letter: 'H' };
-  }
-  else if (activeTab === 'SSA') {
-    const { ang1, s1, s2, rootIndex } = params;
-    const rad = ang1 * Math.PI / 180;
-    B = { x: A.x + s1, y: A.y };
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Congruent Triangles Explorer</title>
     
-    // Solve for distance b (A to C) using Law of Cosines: s2^2 = b^2 + s1^2 - 2*b*s1*cos(ang1)
-    const a_quad = 1;
-    const b_quad = -2 * s1 * Math.cos(rad);
-    const c_quad = s1 * s1 - s2 * s2;
-    const discriminant = b_quad * b_quad - 4 * a_quad * c_quad;
-
-    if (discriminant < 0) {
-      valid = false;
-    } else {
-      let b_val;
-      const root1 = (-b_quad + Math.sqrt(discriminant)) / 2;
-      const root2 = (-b_quad - Math.sqrt(discriminant)) / 2;
-      
-      if (rootIndex === 2 && root2 > 0) {
-        b_val = root2;
-      } else {
-        b_val = root1;
-      }
-      
-      if (b_val <= 0) valid = false;
-      else {
-        C = {
-          x: A.x + b_val * Math.cos(rad),
-          y: A.y - b_val * Math.sin(rad)
-        };
-      }
-    }
-    features.angA = { h: true, label: ang1 + '°', letter: 'A' };
-    features.sideAB = { h: true, label: s1, letter: 'S' };
-    features.sideBC = { h: true, label: s2, letter: 'S' };
-  }
-
-  if (valid) {
-    const centroid = getCentroid(A, B, C);
-    const offsetX = 200 - centroid.x;
-    const offsetY = 175 - centroid.y;
-    A.x += offsetX;
-    A.y += offsetY;
-    B.x += offsetX;
-    B.y += offsetY;
-    C.x += offsetX;
-    C.y += offsetY;
-  }
-
-  return { valid, A, B, C, features };
-};
-
-const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-
-const generateQuizQuestion = (difficulty = 'NORMAL') => {
-  const conditions = ['SSS', 'SAS', 'ASA', 'AAS', 'RHS'];
-  const isCongruent = difficulty === 'HARD' ? (Math.random() > 0.4) : true;
-  const ans = isCongruent ? conditions[randomInt(0, 4)] : 'Not Congruent';
-  
-  let baseCond;
-  if (!isCongruent) {
-    // 50% chance to throw an Angle-Side-Side (SSA) distractor, 50% chance to just mismatch a valid property
-    baseCond = Math.random() > 0.5 ? 'SSA' : conditions[randomInt(0, 4)];
-  } else {
-    baseCond = ans;
-  }
-  
-  let p1 = {}, p2 = {};
-  let attempts = 0;
-  let data1, data2;
-  
-  do {
-    if (baseCond === 'SSA') {
-      const ang1 = randomInt(30, 45); // Keep angle sharp to guarantee 2 valid intersections
-      const s1 = randomInt(180, 220);
-      const height = s1 * Math.sin(ang1 * Math.PI / 180);
-      const min_s2 = Math.floor(height) + 10;
-      const max_s2 = s1 - 10;
-      const s2 = max_s2 > min_s2 ? randomInt(min_s2, max_s2) : min_s2 + 5;
-      
-      // Generate the ambiguous case: Exact same ASS properties, completely different shape
-      p1 = { ang1, s1, s2, rootIndex: 1 };
-      p2 = { ang1, s1, s2, rootIndex: 2 };
-    } else if (baseCond === 'SSS') {
-      p1 = { c: randomInt(120, 200), b: randomInt(120, 200), a: randomInt(120, 200) };
-      p2 = { ...p1 };
-      if (!isCongruent) p2.a += randomInt(0, 1) === 0 ? 40 : -40;
-    } else if (baseCond === 'SAS') {
-      let ang = randomInt(40, 140);
-      if (Math.random() < 0.4) ang = 90;
-      p1 = { s1: randomInt(120, 200), ang: ang, s2: randomInt(120, 200) };
-      p2 = { ...p1 };
-      if (!isCongruent) p2.s2 += randomInt(0, 1) === 0 ? 40 : -40;
-    } else if (baseCond === 'ASA') {
-      let ang1 = randomInt(30, 70);
-      if (Math.random() < 0.4) ang1 = 90;
-      let ang2 = randomInt(30, 70);
-      p1 = { ang1: ang1, s: randomInt(120, 200), ang2: ang2 };
-      p2 = { ...p1 };
-      if (!isCongruent) p2.s += randomInt(0, 1) === 0 ? 40 : -40;
-    } else if (baseCond === 'AAS') {
-      let ang1 = randomInt(30, 70);
-      if (Math.random() < 0.4) ang1 = 90;
-      let ang2 = randomInt(30, 70);
-      p1 = { ang1: ang1, ang2: ang2, s: randomInt(120, 200) };
-      p2 = { ...p1 };
-      if (!isCongruent) p2.s += randomInt(0, 1) === 0 ? 40 : -40;
-    } else if (baseCond === 'RHS') {
-      const leg = randomInt(100, 180);
-      p1 = { leg, hyp: leg + randomInt(30, 80) };
-      p2 = { ...p1 };
-      if (!isCongruent) p2.hyp += randomInt(0, 1) === 0 ? 40 : -40;
-    }
-    
-    data1 = buildTriangleData(baseCond, p1);
-    data2 = buildTriangleData(baseCond, p2);
-    attempts++;
-  } while ((!data1.valid || !data2.valid) && attempts < 100);
-
-  const cc = getCircumcenter(data2.A, data2.B, data2.C);
-  const rotAngle = randomInt(30, 330);
-  let t2A = rotatePoint(data2.A, cc, rotAngle);
-  let t2B = rotatePoint(data2.B, cc, rotAngle);
-  let t2C = rotatePoint(data2.C, cc, rotAngle);
-
-  if (Math.random() > 0.5) {
-    const L2 = { x: cc.x + 100, y: cc.y };
-    t2A = reflectPointAcrossLine(t2A, cc, L2);
-    t2B = reflectPointAcrossLine(t2B, cc, L2);
-    t2C = reflectPointAcrossLine(t2C, cc, L2);
-  }
-
-  // Recenter the scrambled triangle to completely prevent bounds overflow
-  const t2Centroid = getCentroid(t2A, t2B, t2C);
-  const offsetX = 200 - t2Centroid.x;
-  const offsetY = 175 - t2Centroid.y;
-  t2A.x += offsetX;
-  t2A.y += offsetY;
-  t2B.x += offsetX;
-  t2B.y += offsetY;
-  t2C.x += offsetX;
-  t2C.y += offsetY;
-
-  return { answer: ans, data1, data2, t2A, t2B, t2C, isCongruent };
-};
-
-export default function App() {
-  const [mode, setMode] = useState('EXPLORER'); // 'EXPLORER', 'QUIZ_ENTRY', 'QUIZ'
-  const [userName, setUserName] = useState('');
-  const [score, setScore] = useState(0);
-  const [attempts, setAttempts] = useState(0); // Tracks total questions attempted
-  const [quizDifficulty, setQuizDifficulty] = useState('NORMAL');
-  const [quizQuestion, setQuizQuestion] = useState(null);
-  const [quizFeedback, setQuizFeedback] = useState(null);
-
-  const [activeTab, setActiveTab] = useState('SSS');
-  
-  // Replaced binary isOverlapping with a sequenced state machine
-  const [overlapState, setOverlapState] = useState('IDLE'); // 'IDLE', 'ROTATING', 'REFLECTING', 'SLIDING', 'MATCHED'
-  
-  // Separate states for Quiz animation
-  const [quizOverlapState, setQuizOverlapState] = useState('IDLE');
-  const [quizTri2Verts, setQuizTri2Verts] = useState(null);
-
-  // New state & ref for the custom rigid rotation animation loop
-  const [isAnimatingJS, setIsAnimatingJS] = useState(false);
-  const animRef = React.useRef(null);
-
-  // States for each condition's parameters
-  const [paramsSSS, setParamsSSS] = useState({ a: 160, b: 140, c: 200 });
-  const [paramsSAS, setParamsSAS] = useState({ s1: 200, ang: 50, s2: 180 });
-  const [paramsASA, setParamsASA] = useState({ ang1: 45, s: 220, ang2: 60 });
-  const [paramsAAS, setParamsAAS] = useState({ ang1: 40, ang2: 70, s: 160 });
-  const [paramsRHS, setParamsRHS] = useState({ hyp: 250, leg: 150 });
-
-  const calcData = useMemo(() => {
-    const params = {
-      SSS: paramsSSS,
-      SAS: paramsSAS,
-      ASA: paramsASA,
-      AAS: paramsAAS,
-      RHS: paramsRHS
-    }[activeTab];
-    return buildTriangleData(activeTab, params);
-  }, [activeTab, paramsSSS, paramsSAS, paramsASA, paramsAAS, paramsRHS]);
-
-  const [tri2Verts, setTri2Verts] = useState(null);
-
-  // Reset transformations when base triangle changes
-  React.useEffect(() => {
-    // Cancel any active custom animations when dimensions change
-    if (animRef.current) {
-      cancelAnimationFrame(animRef.current);
-      animRef.current = null;
-    }
-    setIsAnimatingJS(false);
-    setTri2Verts(null);
-    setOverlapState('IDLE');
-  }, [calcData]);
-
-  const t2A = tri2Verts ? tri2Verts.A : calcData.A;
-  const t2B = tri2Verts ? tri2Verts.B : calcData.B;
-  const t2C = tri2Verts ? tri2Verts.C : calcData.C;
-
-  const handleRotateTri2 = () => {
-    if (overlapState !== 'IDLE' || isAnimatingJS) return;
-    
-    setIsAnimatingJS(true);
-    const cc = getCircumcenter(t2A, t2B, t2C);
-    
-    // Save starting coordinates for the tweening
-    const startA = { ...t2A };
-    const startB = { ...t2B };
-    const startC = { ...t2C };
-
-    const duration = 800; // Smooth 800ms rotation
-    let startTime = null;
-
-    const animate = (time) => {
-      if (!startTime) startTime = time;
-      const elapsed = time - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      
-      // Ease in-out quadratic for a natural spin motion
-      const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-      const currentAngle = ease * 120;
-
-      // Update absolute coordinates exactly along the circular arc
-      setTri2Verts({
-        A: rotatePoint(startA, cc, currentAngle),
-        B: rotatePoint(startB, cc, currentAngle),
-        C: rotatePoint(startC, cc, currentAngle),
-      });
-
-      if (progress < 1) {
-        animRef.current = requestAnimationFrame(animate);
-      } else {
-        setIsAnimatingJS(false);
-        animRef.current = null;
-      }
-    };
-    
-    animRef.current = requestAnimationFrame(animate);
-  };
-
-  const handleReflectTri2 = (side, P1, P2) => {
-    if (isAnimatingJS || overlapState !== 'IDLE') return;
-    setTri2Verts({
-      A: reflectPointAcrossBisector(t2A, P1, P2),
-      B: reflectPointAcrossBisector(t2B, P1, P2),
-      C: reflectPointAcrossBisector(t2C, P1, P2),
-    });
-  };
-
-  const handleTabChange = (tab) => {
-    setActiveTab(tab);
-    setOverlapState('IDLE');
-  };
-
-  const isBusy = overlapState === 'ROTATING' || overlapState === 'REFLECTING' || overlapState === 'SLIDING' || isAnimatingJS;
-  const isOverlapping = overlapState === 'SLIDING' || overlapState === 'MATCHED';
-
-  // The sequenced animation handler
-  const handleProveClick = () => {
-    if (!calcData.valid || isBusy) return;
-
-    if (overlapState === 'IDLE') {
-      if (tri2Verts) {
-        setIsAnimatingJS(true);
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Base styles and transition smoothing */
+        body { font-family: 'Inter', sans-serif; }
+        .smooth-transition { transition: all 0.5s ease-in-out; }
+        .no-transition { transition: none !important; }
         
-        const startA = { ...t2A };
-        const startB = { ...t2B };
-        const startC = { ...t2C };
-        const targetA = { ...calcData.A };
-        const targetB = { ...calcData.B };
-        const targetC = { ...calcData.C };
-        
-        const CC0 = getCircumcenter(startA, startB, startC);
-        const CCtgt = getCircumcenter(targetA, targetB, targetC);
-        
-        // Calculate the angle difference to align vertex A relative to the circumcenter
-        const theta0 = Math.atan2(startA.y - CC0.y, startA.x - CC0.x);
-        const thetaTgt = Math.atan2(targetA.y - CCtgt.y, targetA.x - CCtgt.x);
-        let deltaAngle = thetaTgt - theta0;
-        while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
-        while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
-        
-        const needsRotation = Math.abs(deltaAngle) > 0.01;
-        const rotDuration = needsRotation ? 800 : 0;
-        
-        // Step 1: Rotation
-        const doRotation = () => {
-          if (!needsRotation) {
-            doReflection(startA, startB, startC);
-            return;
-          }
-          
-          setOverlapState('ROTATING');
-          let startTime = null;
-          
-          const animateRot = (time) => {
-            if (!startTime) startTime = time;
-            const elapsed = time - startTime;
-            const progress = Math.min(elapsed / rotDuration, 1);
-            const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-            
-            const currentAngleOffset = deltaAngle * ease * 180 / Math.PI;
-            const curA = rotatePoint(startA, CC0, currentAngleOffset);
-            const curB = rotatePoint(startB, CC0, currentAngleOffset);
-            const curC = rotatePoint(startC, CC0, currentAngleOffset);
-            
-            setTri2Verts({ A: curA, B: curB, C: curC });
-            
-            if (progress < 1) {
-              animRef.current = requestAnimationFrame(animateRot);
-            } else {
-              doReflection(curA, curB, curC);
-            }
-          };
-          animRef.current = requestAnimationFrame(animateRot);
-        };
-        
-        // Step 2: Reflection
-        const doReflection = (rotA, rotB, rotC) => {
-          // Check winding order (signed area) to determine if it's mirrored compared to the target
-          const wRot = (rotB.x - rotA.x) * (rotC.y - rotA.y) - (rotB.y - rotA.y) * (rotC.x - rotA.x);
-          const wTgt = (targetB.x - targetA.x) * (targetC.y - targetA.y) - (targetB.y - targetA.y) * (targetC.x - targetA.x);
-          
-          const needsReflection = (wRot * wTgt) < 0;
-          const refDuration = needsReflection ? 800 : 0;
-          
-          if (!needsReflection) {
-            doTranslation();
-            return;
-          }
-          
-          setOverlapState('REFLECTING');
-          
-          // The exact axis of reflection that maps them together passes through the Circumcenter and aligned Vertex A
-          const targetRotB = reflectPointAcrossLine(rotB, CC0, rotA);
-          const targetRotC = reflectPointAcrossLine(rotC, CC0, rotA);
-          
-          let startTime = null;
-          const animateRef = (time) => {
-            if (!startTime) startTime = time;
-            const elapsed = time - startTime;
-            const progress = Math.min(elapsed / refDuration, 1);
-            // Smooth 3D-like flip ease
-            const ease = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-            
-            setTri2Verts({
-              A: rotA, // A acts as the hinge on the axis, it doesn't move
-              B: { x: rotB.x + (targetRotB.x - rotB.x) * ease, y: rotB.y + (targetRotB.y - rotB.y) * ease },
-              C: { x: rotC.x + (targetRotC.x - rotC.x) * ease, y: rotC.y + (targetRotC.y - rotC.y) * ease }
-            });
-            
-            if (progress < 1) {
-              animRef.current = requestAnimationFrame(animateRef);
-            } else {
-              doTranslation();
-            }
-          };
-          animRef.current = requestAnimationFrame(animateRef);
-        };
-        
-        // Step 3: Translation
-        const doTranslation = () => {
-          setIsAnimatingJS(false);
-          animRef.current = null;
-          setTri2Verts(null); 
-          setOverlapState('SLIDING');
-          
-          setTimeout(() => {
-            setOverlapState('MATCHED');
-          }, 1000);
-        };
-        
-        // Kick off the sequence
-        doRotation();
-
-      } else {
-        // If the user didn't scramble it at all, skip straight to translation
-        setOverlapState('SLIDING');
-        setTimeout(() => {
-          setOverlapState('MATCHED');
-        }, 1000);
-      }
-    } else {
-      // Reset back to start
-      setOverlapState('IDLE');
-    }
-  };
-
-  // Helper for dynamic button text
-  const getButtonText = () => {
-    if (overlapState === 'ROTATING') return 'Step 1: Aligning Angle...';
-    if (overlapState === 'REFLECTING') return 'Step 2: Flipping...';
-    if (overlapState === 'SLIDING') return 'Step 3: Translating...';
-    if (overlapState === 'MATCHED') return 'Separate Triangles';
-    return 'Prove Congruence (Overlap)';
-  };
-
-  const handleNavQuiz = (difficulty) => {
-    setQuizDifficulty(difficulty);
-    if (!userName.trim()) {
-      setMode('QUIZ_ENTRY');
-    } else {
-      setScore(0);
-      setAttempts(0);
-      setQuizOverlapState('IDLE');
-      setQuizTri2Verts(null);
-      setQuizFeedback(null);
-      setQuizQuestion(generateQuizQuestion(difficulty));
-      setMode('QUIZ');
-    }
-  };
-
-  const handleStartQuiz = (e) => {
-    if (e) e.preventDefault();
-    if (!userName.trim()) {
-      alert("Please enter your name first!");
-      return;
-    }
-    setScore(0);
-    setAttempts(0);
-    setQuizOverlapState('IDLE');
-    setQuizTri2Verts(null);
-    setQuizFeedback(null);
-    setQuizQuestion(generateQuizQuestion(quizDifficulty));
-    setMode('QUIZ');
-  };
-
-  const handleNextQuestion = () => {
-    setQuizQuestion(generateQuizQuestion(quizDifficulty));
-    setQuizFeedback(null);
-    setQuizOverlapState('IDLE');
-    setQuizTri2Verts(null);
-  };
-
-  const triggerQuizAnimation = (autoAdvance, isReplay = false) => {
-    // If it's a replay, reset to IDLE, let the CSS slide it back, then start rotation
-    if (isReplay) {
-      setQuizOverlapState('IDLE');
-      setQuizTri2Verts(null);
-      setTimeout(() => {
-        triggerQuizAnimation(autoAdvance, false);
-      }, 1000);
-      return;
-    }
-
-    setQuizOverlapState('TRANSFORMING');
-    setIsAnimatingJS(true);
-    
-    const startA = { ...quizQuestion.t2A };
-    const startB = { ...quizQuestion.t2B };
-    const startC = { ...quizQuestion.t2C };
-    
-    // Unscramble Triangle 2 back to its native data2 coordinates
-    const targetA = { ...quizQuestion.data2.A };
-    const targetB = { ...quizQuestion.data2.B };
-    const targetC = { ...quizQuestion.data2.C };
-    
-    const CC0 = getCircumcenter(startA, startB, startC);
-    const CCtgt = getCircumcenter(targetA, targetB, targetC);
-    
-    const theta0 = Math.atan2(startA.y - CC0.y, startA.x - CC0.x);
-    const thetaTgt = Math.atan2(targetA.y - CCtgt.y, targetA.x - CCtgt.x);
-    let deltaAngle = thetaTgt - theta0;
-    while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
-    while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
-    
-    const needsRotation = Math.abs(deltaAngle) > 0.01;
-    const rotDuration = needsRotation ? 700 : 0;
-    
-    const doRotation = () => {
-      if (!needsRotation) {
-        doReflection(startA, startB, startC);
-        return;
-      }
-      setQuizOverlapState('ROTATING');
-      let startTime = null;
-      const animateRot = (time) => {
-        if (!startTime) startTime = time;
-        const elapsed = time - startTime;
-        const progress = Math.min(elapsed / rotDuration, 1);
-        const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-        
-        const currentAngleOffset = deltaAngle * ease * 180 / Math.PI;
-        const curA = rotatePoint(startA, CC0, currentAngleOffset);
-        const curB = rotatePoint(startB, CC0, currentAngleOffset);
-        const curC = rotatePoint(startC, CC0, currentAngleOffset);
-        
-        setQuizTri2Verts({ A: curA, B: curB, C: curC });
-        
-        if (progress < 1) {
-          animRef.current = requestAnimationFrame(animateRot);
-        } else {
-          doReflection(curA, curB, curC);
+        /* Custom range slider styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
         }
-      };
-      animRef.current = requestAnimationFrame(animateRot);
-    };
-    
-    const doReflection = (rotA, rotB, rotC) => {
-      const wRot = (rotB.x - rotA.x) * (rotC.y - rotA.y) - (rotB.y - rotA.y) * (rotC.x - rotA.x);
-      const wTgt = (targetB.x - targetA.x) * (targetC.y - targetA.y) - (targetB.y - targetA.y) * (targetC.x - targetA.x);
-      const needsReflection = (wRot * wTgt) < 0;
-      const refDuration = needsReflection ? 700 : 0;
-      
-      if (!needsReflection) {
-        doTranslation(rotA, rotB, rotC);
-        return;
-      }
-      setQuizOverlapState('REFLECTING');
-      const targetRotB = reflectPointAcrossLine(rotB, CC0, rotA);
-      const targetRotC = reflectPointAcrossLine(rotC, CC0, rotA);
-      
-      let startTime = null;
-      const animateRef = (time) => {
-        if (!startTime) startTime = time;
-        const elapsed = time - startTime;
-        const progress = Math.min(elapsed / refDuration, 1);
-        const ease = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-        
-        setQuizTri2Verts({
-          A: rotA,
-          B: { x: rotB.x + (targetRotB.x - rotB.x) * ease, y: rotB.y + (targetRotB.y - rotB.y) * ease },
-          C: { x: rotC.x + (targetRotC.x - rotC.x) * ease, y: rotC.y + (targetRotC.y - rotC.y) * ease }
-        });
-        
-        if (progress < 1) {
-          animRef.current = requestAnimationFrame(animateRef);
-        } else {
-          doTranslation(rotA, targetRotB, targetRotC);
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #2563eb;
+            cursor: pointer;
+            margin-top: -6px;
         }
-      };
-      animRef.current = requestAnimationFrame(animateRef);
-    };
-    
-    const doTranslation = (currentA, currentB, currentC) => {
-      setIsAnimatingJS(true);
-      setQuizOverlapState('SLIDING');
-      
-      const transTargetA = { ...quizQuestion.data2.A };
-      const transTargetB = { ...quizQuestion.data2.B };
-      const transTargetC = { ...quizQuestion.data2.C };
-      
-      const transDuration = 1000;
-      let startTime = null;
-      
-      const animateTrans = (time) => {
-        if (!startTime) startTime = time;
-        const elapsed = time - startTime;
-        const progress = Math.min(elapsed / transDuration, 1);
-        const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-        
-        setQuizTri2Verts({
-          A: { x: currentA.x + (transTargetA.x - currentA.x) * ease, y: currentA.y + (transTargetA.y - currentA.y) * ease },
-          B: { x: currentB.x + (transTargetB.x - currentB.x) * ease, y: currentB.y + (transTargetB.y - currentB.y) * ease },
-          C: { x: currentC.x + (transTargetC.x - currentC.x) * ease, y: currentC.y + (transTargetC.y - currentC.y) * ease }
-        });
-        
-        if (progress < 1) {
-          animRef.current = requestAnimationFrame(animateTrans);
-        } else {
-          setIsAnimatingJS(false);
-          animRef.current = null;
-          setQuizOverlapState('MATCHED');
-          
-          // Wait on matched before moving to next question if autoAdvance is true
-          if (autoAdvance) {
-            setTimeout(() => {
-              handleNextQuestion();
-            }, 2000);
-          }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #e2e8f0;
+            border-radius: 2px;
         }
-      };
-      animRef.current = requestAnimationFrame(animateTrans);
-    };
-    
-    doRotation();
-  };
+    </style>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-800 flex flex-col">
 
-  const handleQuizAnswer = (ans) => {
-    if (quizFeedback || isAnimatingJS) return;
-    
-    const newAttempts = attempts + 1;
-    setAttempts(newAttempts);
-    
-    const isCorrect = ans === quizQuestion.answer;
-    let newScore = score;
-    
-    if (isCorrect) {
-      newScore = score + 1;
-      setScore(newScore);
-      setQuizFeedback({ isCorrect: true, text: `Correct! The condition is ${ans}.` });
-    } else {
-      setQuizFeedback({ isCorrect: false, text: `Incorrect. The correct condition was ${quizQuestion.answer}.` });
-    }
-    
-    // Automatically save data to Google Sheets after every question is answered
-    const scriptURL = "https://script.google.com/macros/s/AKfycbwFMKOLJ-Wf6ITtCRHxPNDK4RHFEYUhblSLiJ8eUoShCe46hPPZ6KStJ30Jhi_TFLc/exec"; 
-    fetch(scriptURL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        name: userName,
-        mode: quizDifficulty,
-        score: newScore,
-        attempts: newAttempts
-      })
-    })
-    .then(res => res.json())
-    .then(data => console.log('Score updated in background:', data))
-    .catch(error => console.error('Error saving score:', error));
-
-    // Start the identical Prove Congruence animation sequence for Quiz Mode
-    triggerQuizAnimation(isCorrect, false);
-  };
-
-  const isQuizOverlapping = quizOverlapState === 'SLIDING' || quizOverlapState === 'MATCHED';
-  const qT2Verts = quizTri2Verts || (quizQuestion ? { A: quizQuestion.t2A, B: quizQuestion.t2B, C: quizQuestion.t2C } : null);
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col">
-      {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-6 py-4 shadow-sm z-10">
-        <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-lg">
-              <Layers className="text-white w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900 leading-tight">Congruent Triangles Explorer</h1>
-              <p className="text-slate-500 text-sm hidden sm:block">Interactive visualization of triangle congruence postulates</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2 justify-center">
-            <button
-              onClick={() => setMode('EXPLORER')}
-              className={`px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${mode === 'EXPLORER' ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
-            >
-              Explorer
-            </button>
-            <button
-              onClick={() => handleNavQuiz('NORMAL')}
-              className={`px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${(mode === 'QUIZ' || mode === 'QUIZ_ENTRY') && quizDifficulty === 'NORMAL' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
-            >
-              Quiz 1 (Normal)
-            </button>
-            <button
-              onClick={() => handleNavQuiz('HARD')}
-              className={`px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${(mode === 'QUIZ' || mode === 'QUIZ_ENTRY') && quizDifficulty === 'HARD' ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
-            >
-              Quiz 2 (Hard)
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="flex-1 max-w-6xl mx-auto w-full p-4 md:p-6 flex flex-col lg:flex-row gap-6">
-        
-        {mode === 'QUIZ_ENTRY' && (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 max-w-md w-full">
-              <h2 className="text-2xl font-bold text-center mb-6">
-                {quizDifficulty === 'NORMAL' ? 'Quiz 1 (Normal)' : 'Quiz 2 (Hard)'}
-              </h2>
-              <form onSubmit={handleStartQuiz} className="flex flex-col gap-4">
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 px-6 py-4 shadow-sm z-10">
+        <div class="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+                <div class="bg-blue-600 p-2 rounded-lg">
+                    <i data-lucide="layers" class="text-white w-6 h-6"></i>
+                </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Enter your name:</label>
-                  <input 
-                    type="text" 
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                    placeholder="E.g., Euclid"
-                    required
-                  />
+                    <h1 class="text-2xl font-bold text-slate-900 leading-tight">Congruent Triangles Explorer</h1>
+                    <p class="text-slate-500 text-sm hidden sm:block">Interactive visualization of triangle congruence postulates</p>
                 </div>
-                <button type="submit" className={`w-full text-white font-bold py-3 rounded-lg transition-colors shadow-sm mt-2 ${quizDifficulty === 'NORMAL' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-purple-600 hover:bg-purple-700'}`}>
-                  Start {quizDifficulty === 'NORMAL' ? 'Normal' : 'Hard'} Quiz
-                </button>
-              </form>
             </div>
-          </div>
-        )}
-
-        {mode === 'QUIZ' && quizQuestion && (
-          <div className="flex-1 flex flex-col gap-6">
-            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center">
-              <div className="font-semibold text-lg text-slate-700">Player: <span className="text-blue-600">{userName}</span> <span className="text-sm bg-slate-100 px-2 py-1 rounded ml-2">{quizDifficulty}</span></div>
-              <div className="font-bold text-xl text-slate-800">
-                Score: <span className="text-emerald-600">{score}</span> <span className="text-slate-400 font-normal text-lg">/ {attempts}</span>
-              </div>
+            <div class="flex flex-wrap gap-2 justify-center" id="nav-buttons">
+                <!-- Nav buttons injected via JS -->
             </div>
+        </div>
+    </header>
 
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 text-center">
-              <h3 className="text-xl font-bold mb-2">Which condition proves these triangles are congruent?</h3>
-              <p className="text-slate-500 mb-6">Observe the highlighted sides and angles.</p>
-              
-              <div className="relative bg-slate-50 rounded-xl shadow-inner border border-slate-200 overflow-hidden flex-1 min-h-[400px] flex flex-col mb-8">
+    <!-- Main Application Area -->
+    <main id="app-root" class="flex-1 max-w-6xl mx-auto w-full p-4 md:p-6 flex flex-col lg:flex-row gap-6">
+        <!-- Content will be injected here by JS -->
+    </main>
+
+    <script>
+        // --- CONSTANTS & DEFINITIONS ---
+        const CONDITIONS = {
+            SSS: {
+                id: 'SSS',
+                title: 'Side-Side-Side (SSS)',
+                desc: 'If three sides of one triangle are equal to three sides of another triangle, the triangles are congruent.',
+                details: 'Because all three side lengths are fixed, the shape is completely locked. There is only one possible triangle that can be formed.'
+            },
+            SAS: {
+                id: 'SAS',
+                title: 'Side-Angle-Side (SAS)',
+                desc: 'If two sides and the included angle of one triangle are equal to the corresponding parts of another, they are congruent.',
+                details: 'The included angle acts like a hinge locked in place. With the lengths of the two arms also fixed, the third side can only have one specific length.'
+            },
+            ASA: {
+                id: 'ASA',
+                title: 'Angle-Side-Angle (ASA)',
+                desc: 'If two angles and the included side of one triangle are equal to the corresponding parts of another, they are congruent.',
+                details: 'By locking the base side and the exact trajectory of the other two sides (the angles), they can only intersect at one specific point.'
+            },
+            AAS: {
+                id: 'AAS',
+                title: 'Angle-Angle-Side (AAS)',
+                desc: 'If two angles and a non-included side of one triangle are equal to the corresponding parts of another, they are congruent.',
+                details: 'Knowing two angles means you know the third (they add up to 180°). This essentially turns it into an ASA condition, locking the shape perfectly.'
+            },
+            RHS: {
+                id: 'RHS',
+                title: 'Right angle-Hypotenuse-Side (RHS)',
+                desc: 'If the hypotenuse and one side of a right-angled triangle are equal to the corresponding parts of another, they are congruent.',
+                details: 'The Pythagorean theorem states a² + b² = c². If you lock the hypotenuse (c), one side (a), and the right angle, the third side (b) is mathematically forced to be exactly one length.'
+            }
+        };
+
+        // --- GLOBAL STATE ---
+        const state = {
+            mode: 'EXPLORER', // 'EXPLORER', 'QUIZ_ENTRY', 'QUIZ'
+            userName: '',
+            score: 0,
+            attempts: 0,
+            quizDifficulty: 'NORMAL',
+            quizQuestion: null,
+            quizFeedback: null,
+
+            activeTab: 'SSS',
+            overlapState: 'IDLE', // 'IDLE', 'ROTATING', 'REFLECTING', 'SLIDING', 'MATCHED'
+            quizOverlapState: 'IDLE',
+            
+            isAnimatingJS: false,
+            animRef: null,
+            tri2Verts: null,
+            quizTri2Verts: null,
+
+            params: {
+                SSS: { a: 160, b: 140, c: 200 },
+                SAS: { s1: 200, ang: 50, s2: 180 },
+                ASA: { ang1: 45, s: 220, ang2: 60 },
+                AAS: { ang1: 40, ang2: 70, s: 160 },
+                RHS: { hyp: 250, leg: 150 },
+                SSA: { ang1: 35, s1: 200, s2: 150, rootIndex: 1 } // For distractors
+            },
+            calcData: { valid: false }
+        };
+
+        // --- MATH HELPERS ---
+        const pushOut = (pt, center, dist) => {
+            const dx = pt.x - center.x;
+            const dy = pt.y - center.y;
+            const len = Math.hypot(dx, dy);
+            if (len === 0) return pt;
+            return { x: pt.x + (dx / len) * dist, y: pt.y + (dy / len) * dist };
+        };
+
+        const pushIn = (pt, center, dist) => {
+            const dx = center.x - pt.x;
+            const dy = center.y - pt.y;
+            const len = Math.hypot(dx, dy);
+            if (len === 0) return pt;
+            return { x: pt.x + (dx / len) * dist, y: pt.y + (dy / len) * dist };
+        };
+
+        const getCentroid = (A, B, C) => {
+            return {
+                x: (A.x + B.x + C.x) / 3,
+                y: (A.y + B.y + C.y) / 3
+            };
+        };
+
+        const getCircumcenter = (A, B, C) => {
+            const D = 2 * (A.x * (B.y - C.y) + B.x * (C.y - A.y) + C.x * (A.y - B.y));
+            if (Math.abs(D) < 0.001) return { x: 0, y: 0 }; 
+            const Ux = ((A.x*A.x + A.y*A.y) * (B.y - C.y) + (B.x*B.x + B.y*B.y) * (C.y - A.y) + (C.x*C.x + C.y*C.y) * (A.y - B.y)) / D;
+            const Uy = ((A.x*A.x + A.y*A.y) * (C.x - B.x) + (B.x*B.x + B.y*B.y) * (A.x - C.x) + (C.x*C.x + C.y*C.y) * (B.x - A.x)) / D;
+            return { x: Ux, y: Uy };
+        };
+
+        const rotatePoint = (pt, center, angleDeg) => {
+            const rad = angleDeg * Math.PI / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            const dx = pt.x - center.x;
+            const dy = pt.y - center.y;
+            return {
+                x: center.x + dx * cos - dy * sin,
+                y: center.y + dx * sin + dy * cos
+            };
+        };
+
+        const reflectPointAcrossBisector = (pt, P1, P2) => {
+            const Mx = (P1.x + P2.x) / 2;
+            const My = (P1.y + P2.y) / 2;
+            const a = P2.x - P1.x;
+            const b = P2.y - P1.y;
+            const c = -(a * Mx + b * My);
+            const denom = a*a + b*b;
+            if (denom < 0.001) return pt;
+            const d = (a * pt.x + b * pt.y + c) / denom;
+            return {
+                x: pt.x - 2 * a * d,
+                y: pt.y - 2 * b * d
+            };
+        };
+
+        const reflectPointAcrossLine = (pt, L1, L2) => {
+            const dx = L2.x - L1.x;
+            const dy = L2.y - L1.y;
+            const len = Math.hypot(dx, dy);
+            if (len === 0) return pt;
+            const nx = -dy / len;
+            const ny = dx / len;
+            const dist = (pt.x - L1.x) * nx + (pt.y - L1.y) * ny;
+            return {
+                x: pt.x - 2 * dist * nx,
+                y: pt.y - 2 * dist * ny
+            };
+        };
+
+        const dir = (p1, p2) => {
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const len = Math.hypot(dx, dy);
+            if (len === 0) return { x: 0, y: 0 };
+            return { x: dx / len, y: dy / len };
+        };
+
+        // --- TRIANGLE DATA BUILDER ---
+        const buildTriangleData = (activeTab, params) => {
+            let A = { x: 50, y: 300 };
+            let B = { x: 50, y: 300 };
+            let C = { x: 50, y: 300 };
+            let valid = true;
+            let features = {
+                sideAB: { h: false, label: '', letter: '' },
+                sideBC: { h: false, label: '', letter: '' },
+                sideCA: { h: false, label: '', letter: '' },
+                angA: { h: false, label: '', letter: '' },
+                angB: { h: false, label: '', letter: '' },
+                angC: { h: false, label: '', letter: '' },
+                isRightA: false
+            };
+
+            if (activeTab === 'SSS') {
+                const { a, b, c } = params;
+                if (a + b <= c || a + c <= b || b + c <= a) valid = false;
+                B = { x: A.x + c, y: A.y };
+                const Cx = (c * c + b * b - a * a) / (2 * c);
+                const Cy = -Math.sqrt(Math.max(0, b * b - Cx * Cx));
+                C = { x: A.x + Cx, y: A.y + Cy };
+                features.sideAB = { h: true, label: c, letter: 'S' };
+                features.sideBC = { h: true, label: a, letter: 'S' };
+                features.sideCA = { h: true, label: b, letter: 'S' };
+            } 
+            else if (activeTab === 'SAS') {
+                const { s1, ang, s2 } = params;
+                B = { x: A.x + s1, y: A.y };
+                C = { 
+                    x: A.x + s2 * Math.cos(ang * Math.PI / 180), 
+                    y: A.y - s2 * Math.sin(ang * Math.PI / 180) 
+                };
+                features.sideAB = { h: true, label: s1, letter: 'S' };
+                features.angA = { h: true, label: ang + '°', letter: 'A' };
+                if (ang === 90) features.isRightA = true;
+                features.sideCA = { h: true, label: s2, letter: 'S' };
+            } 
+            else if (activeTab === 'ASA') {
+                const { ang1, s, ang2 } = params;
+                const ang3 = 180 - ang1 - ang2;
+                if (ang3 <= 0) valid = false;
+                const b = s * Math.sin(ang2 * Math.PI / 180) / Math.sin(ang3 * Math.PI / 180);
+                B = { x: A.x + s, y: A.y };
+                C = { 
+                    x: A.x + b * Math.cos(ang1 * Math.PI / 180), 
+                    y: A.y - b * Math.sin(ang1 * Math.PI / 180) 
+                };
+                features.sideAB = { h: true, label: s, letter: 'S' };
+                features.angA = { h: true, label: ang1 + '°', letter: 'A' };
+                if (ang1 === 90) features.isRightA = true;
+                features.angB = { h: true, label: ang2 + '°', letter: 'A' };
+            } 
+            else if (activeTab === 'AAS') {
+                const { ang1, ang2, s } = params;
+                const ang3 = 180 - ang1 - ang2;
+                if (ang3 <= 0) valid = false;
+                const b = s * Math.sin(ang2 * Math.PI / 180) / Math.sin(ang1 * Math.PI / 180);
+                const c = s * Math.sin(ang3 * Math.PI / 180) / Math.sin(ang1 * Math.PI / 180);
+                B = { x: A.x + c, y: A.y };
+                C = { 
+                    x: A.x + b * Math.cos(ang1 * Math.PI / 180), 
+                    y: A.y - b * Math.sin(ang1 * Math.PI / 180) 
+                };
+                features.angA = { h: true, label: ang1 + '°', letter: 'A' };
+                if (ang1 === 90) features.isRightA = true;
+                features.angB = { h: true, label: ang2 + '°', letter: 'A' };
+                features.sideBC = { h: true, label: s, letter: 'S' };
+            } 
+            else if (activeTab === 'RHS') {
+                const { hyp, leg } = params;
+                if (hyp <= leg) valid = false;
+                B = { x: A.x + leg, y: A.y };
+                const leg2 = Math.sqrt(Math.max(0, hyp * hyp - leg * leg));
+                C = { x: A.x, y: A.y - leg2 };
+                features.isRightA = true;
+                features.angA = { h: true, label: '90°', letter: 'R' };
+                features.sideAB = { h: true, label: leg, letter: 'S' };
+                features.sideBC = { h: true, label: hyp, letter: 'H' };
+            }
+            else if (activeTab === 'SSA') { // Distractor logic
+                const { ang1, s1, s2, rootIndex } = params;
+                const rad = ang1 * Math.PI / 180;
+                B = { x: A.x + s1, y: A.y };
                 
-                {/* Status Overlay during animation */}
-                <div className="absolute top-4 left-0 right-0 flex justify-center z-10 pointer-events-none">
-                  {quizOverlapState !== 'IDLE' && quizOverlapState !== 'MATCHED' && (
-                    <div className="bg-white/90 backdrop-blur px-6 py-2 rounded-full font-bold text-blue-700 shadow-sm border border-blue-100 flex items-center gap-2">
-                      <Layers className="w-5 h-5 animate-pulse" />
-                      {quizOverlapState === 'ROTATING' ? 'Step 1: Aligning Angle...' : 
-                       quizOverlapState === 'REFLECTING' ? 'Step 2: Flipping...' : 
-                       'Step 3: Translating to overlap...'}
-                    </div>
-                  )}
-                </div>
+                const a_quad = 1;
+                const b_quad = -2 * s1 * Math.cos(rad);
+                const c_quad = s1 * s1 - s2 * s2;
+                const discriminant = b_quad * b_quad - 4 * a_quad * c_quad;
 
-                <div className="relative flex-1 w-full overflow-hidden" style={{ minHeight: '400px' }}>
-                  
-                  {/* Triangle 1 */}
-                  <div 
-                    className="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out"
-                    style={{ left: isQuizOverlapping ? '50%' : '20%', transform: 'translateX(-50%)', width: '400px' }}
-                  >
-                    <svg viewBox="0 0 400 350" className="w-full h-full">
-                      <TriangleRenderer 
-                        data={quizQuestion.data1} 
-                        baseColor="#3b82f6" 
-                        fillColor="rgba(59, 130, 246, 0.15)"
-                        textColor="#1e3a8a"
-                        showLetters={quizOverlapState === 'MATCHED' && quizQuestion.isCongruent}
-                      />
-                    </svg>
-                    <div className="absolute bottom-4 left-0 right-0 text-center font-semibold text-blue-700 opacity-70">Triangle 1</div>
-                  </div>
+                if (discriminant < 0) {
+                    valid = false;
+                } else {
+                    let b_val;
+                    const root1 = (-b_quad + Math.sqrt(discriminant)) / 2;
+                    const root2 = (-b_quad - Math.sqrt(discriminant)) / 2;
+                    
+                    if (rootIndex === 2 && root2 > 0) {
+                        b_val = root2;
+                    } else {
+                        b_val = root1;
+                    }
+                    
+                    if (b_val <= 0) valid = false;
+                    else {
+                        C = {
+                            x: A.x + b_val * Math.cos(rad),
+                            y: A.y - b_val * Math.sin(rad)
+                        };
+                    }
+                }
+                features.angA = { h: true, label: ang1 + '°', letter: 'A' };
+                features.sideAB = { h: true, label: s1, letter: 'S' };
+                features.sideBC = { h: true, label: s2, letter: 'S' };
+            }
 
-                  {/* Triangle 2 */}
-                  <div 
-                    className="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out"
-                    style={{ left: isQuizOverlapping ? '50%' : '80%', transform: 'translateX(-50%)', width: '400px', mixBlendMode: isQuizOverlapping ? 'multiply' : 'normal' }}
-                  >
-                    <svg viewBox="0 0 400 350" className="w-full h-full">
-                      <TriangleRenderer 
-                        data={{ ...quizQuestion.data2, A: qT2Verts.A, B: qT2Verts.B, C: qT2Verts.C }} 
-                        baseColor="#f97316" 
-                        fillColor="rgba(249, 115, 22, 0.15)"
-                        textColor="#9a3412"
-                        isAnimatingJS={isAnimatingJS}
-                        showLetters={quizOverlapState === 'MATCHED' && quizQuestion.isCongruent}
-                      />
-                    </svg>
-                    <div className={`absolute bottom-4 left-0 right-0 text-center font-semibold text-orange-600 transition-opacity ${isQuizOverlapping ? 'opacity-0' : 'opacity-70'}`}>Triangle 2</div>
-                  </div>
-                  
-                  {/* Success/Fail Overlay Match Message */}
-                  <div className={`absolute top-4 left-0 right-0 flex justify-center z-10 transition-all duration-700 ${quizOverlapState === 'MATCHED' ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
-                    {quizQuestion.isCongruent ? (
-                      <div className="bg-emerald-100 text-emerald-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-lg border border-emerald-200">
-                        <CheckCircle2 className="w-5 h-5" />
-                        Matched! Triangles are congruent.
-                      </div>
-                    ) : (
-                      <div className="bg-red-100 text-red-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-lg border border-red-200">
-                        <AlertTriangle className="w-5 h-5" />
-                        Mismatched! Triangles are NOT congruent.
-                      </div>
-                    )}
-                  </div>
+            if (valid) {
+                const centroid = getCentroid(A, B, C);
+                const offsetX = 200 - centroid.x;
+                const offsetY = 175 - centroid.y;
+                A.x += offsetX;
+                A.y += offsetY;
+                B.x += offsetX;
+                B.y += offsetY;
+                C.x += offsetX;
+                C.y += offsetY;
+            }
 
-                </div>
-              </div>
+            return { valid, A, B, C, features };
+        };
 
-              {quizFeedback ? (
-                <div className="flex flex-col gap-4 mb-6 w-full">
-                  <div className={`p-4 rounded-lg font-bold text-lg ${quizFeedback.isCorrect ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-red-100 text-red-800 border border-red-200'}`}>
-                    {quizFeedback.text}
-                  </div>
-                  {quizOverlapState === 'MATCHED' && !quizFeedback.isCorrect && (
-                    <div className="flex flex-wrap justify-center gap-3">
-                      <button
-                        onClick={() => triggerQuizAnimation(false, true)}
-                        className="px-6 py-3 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-lg transition-colors flex items-center gap-2"
-                      >
-                        <RefreshCw className="w-5 h-5" /> Replay Animation
-                      </button>
-                      <button
-                        onClick={handleNextQuestion}
-                        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition-colors shadow-sm flex items-center gap-2"
-                      >
-                        Next Question <ArrowRight className="w-5 h-5" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex flex-wrap justify-center gap-3">
-                  {['SSS', 'SAS', 'ASA', 'AAS', 'RHS', ...(quizDifficulty === 'HARD' ? ['Not Congruent'] : [])].map(ans => (
-                    <button 
-                      key={ans}
-                      onClick={() => handleQuizAnswer(ans)}
-                      disabled={quizOverlapState !== 'IDLE'}
-                      className={`px-6 py-3 font-bold rounded-lg transition-colors min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed ${ans === 'Not Congruent' ? 'bg-purple-100 hover:bg-purple-200 text-purple-800' : 'bg-blue-100 hover:bg-blue-200 text-blue-800'}`}
-                    >
-                      {ans}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-        {mode === 'EXPLORER' && (
-          <>
-            {/* Left Sidebar - Controls */}
-            <div className="w-full lg:w-80 flex flex-col gap-4">
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="p-4 border-b border-slate-100 bg-slate-50/50">
-                  <h2 className="font-semibold flex items-center gap-2">
-                    <Settings2 className="w-4 h-4 text-slate-500" /> Choose Condition
-                  </h2>
-                </div>
-                <div className="p-2 flex flex-col gap-1">
-                  {Object.values(CONDITIONS).map(cond => (
-                    <button
-                      key={cond.id}
-                      onClick={() => handleTabChange(cond.id)}
-                      className={`text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
-                        activeTab === cond.id 
-                          ? 'bg-blue-50 text-blue-700 border border-blue-200' 
-                          : 'text-slate-600 hover:bg-slate-50 border border-transparent'
-                      }`}
-                    >
-                      {cond.title}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col gap-5">
-                <h3 className="font-semibold text-slate-800 border-b border-slate-100 pb-2">Adjust Parameters</h3>
+        // --- QUIZ GENERATOR ---
+        const generateQuizQuestion = (difficulty = 'NORMAL') => {
+            const conditions = ['SSS', 'SAS', 'ASA', 'AAS', 'RHS'];
+            const isCongruent = difficulty === 'HARD' ? (Math.random() > 0.4) : true;
+            const ans = isCongruent ? conditions[randomInt(0, 4)] : 'Not Congruent';
+            
+            let baseCond;
+            if (!isCongruent) {
+                baseCond = Math.random() > 0.5 ? 'SSA' : conditions[randomInt(0, 4)];
+            } else {
+                baseCond = ans;
+            }
+            
+            let p1 = {}, p2 = {};
+            let attempts = 0;
+            let data1, data2;
+            
+            do {
+                if (baseCond === 'SSA') {
+                    const ang1 = randomInt(30, 45); 
+                    const s1 = randomInt(180, 220);
+                    const height = s1 * Math.sin(ang1 * Math.PI / 180);
+                    const min_s2 = Math.floor(height) + 10;
+                    const max_s2 = s1 - 10;
+                    const s2 = max_s2 > min_s2 ? randomInt(min_s2, max_s2) : min_s2 + 5;
+                    
+                    p1 = { ang1, s1, s2, rootIndex: 1 };
+                    p2 = { ang1, s1, s2, rootIndex: 2 };
+                } else if (baseCond === 'SSS') {
+                    p1 = { c: randomInt(120, 200), b: randomInt(120, 200), a: randomInt(120, 200) };
+                    p2 = { ...p1 };
+                    if (!isCongruent) p2.a += randomInt(0, 1) === 0 ? 40 : -40;
+                } else if (baseCond === 'SAS') {
+                    let ang = randomInt(40, 140);
+                    if (Math.random() < 0.4) ang = 90;
+                    p1 = { s1: randomInt(120, 200), ang: ang, s2: randomInt(120, 200) };
+                    p2 = { ...p1 };
+                    if (!isCongruent) p2.s2 += randomInt(0, 1) === 0 ? 40 : -40;
+                } else if (baseCond === 'ASA') {
+                    let ang1 = randomInt(30, 70);
+                    if (Math.random() < 0.4) ang1 = 90;
+                    let ang2 = randomInt(30, 70);
+                    p1 = { ang1: ang1, s: randomInt(120, 200), ang2: ang2 };
+                    p2 = { ...p1 };
+                    if (!isCongruent) p2.s += randomInt(0, 1) === 0 ? 40 : -40;
+                } else if (baseCond === 'AAS') {
+                    let ang1 = randomInt(30, 70);
+                    if (Math.random() < 0.4) ang1 = 90;
+                    let ang2 = randomInt(30, 70);
+                    p1 = { ang1: ang1, ang2: ang2, s: randomInt(120, 200) };
+                    p2 = { ...p1 };
+                    if (!isCongruent) p2.s += randomInt(0, 1) === 0 ? 40 : -40;
+                } else if (baseCond === 'RHS') {
+                    const leg = randomInt(100, 180);
+                    p1 = { leg, hyp: leg + randomInt(30, 80) };
+                    p2 = { ...p1 };
+                    if (!isCongruent) p2.hyp += randomInt(0, 1) === 0 ? 40 : -40;
+                }
                 
-                {activeTab === 'SSS' && (
-                  <>
-                    <Slider label="Side 1 (Base)" value={paramsSSS.c} min={80} max={250} onChange={(v) => setParamsSSS({...paramsSSS, c: v})} />
-                    <Slider label="Side 2 (Left)" value={paramsSSS.b} min={80} max={250} onChange={(v) => setParamsSSS({...paramsSSS, b: v})} />
-                    <Slider label="Side 3 (Right)" value={paramsSSS.a} min={80} max={250} onChange={(v) => setParamsSSS({...paramsSSS, a: v})} />
-                  </>
-                )}
+                data1 = buildTriangleData(baseCond, p1);
+                data2 = buildTriangleData(baseCond, p2);
+                attempts++;
+            } while ((!data1.valid || !data2.valid) && attempts < 100);
+
+            const cc = getCircumcenter(data2.A, data2.B, data2.C);
+            const rotAngle = randomInt(30, 330);
+            let t2A = rotatePoint(data2.A, cc, rotAngle);
+            let t2B = rotatePoint(data2.B, cc, rotAngle);
+            let t2C = rotatePoint(data2.C, cc, rotAngle);
+
+            if (Math.random() > 0.5) {
+                const L2 = { x: cc.x + 100, y: cc.y };
+                t2A = reflectPointAcrossLine(t2A, cc, L2);
+                t2B = reflectPointAcrossLine(t2B, cc, L2);
+                t2C = reflectPointAcrossLine(t2C, cc, L2);
+            }
+
+            const t2Centroid = getCentroid(t2A, t2B, t2C);
+            const offsetX = 200 - t2Centroid.x;
+            const offsetY = 175 - t2Centroid.y;
+            t2A.x += offsetX;
+            t2A.y += offsetY;
+            t2B.x += offsetX;
+            t2B.y += offsetY;
+            t2C.x += offsetX;
+            t2C.y += offsetY;
+
+            return { answer: ans, data1, data2, t2A, t2B, t2C, isCongruent };
+        };
+
+        // --- SVG RENDERER ---
+        const renderTriangleSVG = (data, options) => {
+            if (!data.valid) return '';
+
+            const { baseColor, fillColor, textColor, showCircumcenter, isAnimatingJS, showLetters, onCircumcenterClick, onSideClick } = options;
+            const { A, B, C, features } = data;
+
+            const midAB = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+            const midBC = { x: (B.x + C.x) / 2, y: (B.y + C.y) / 2 };
+            const midCA = { x: (C.x + A.x) / 2, y: (C.y + A.y) / 2 };
+            const centroid = { x: (A.x + B.x + C.x) / 3, y: (A.y + B.y + C.y) / 3 };
+
+            const lblAB = pushOut(midAB, centroid, 20);
+            const lblBC = pushOut(midBC, centroid, 20);
+            const lblCA = pushOut(midCA, centroid, 20);
+            
+            const lblAngA = pushIn(A, centroid, 30);
+            const lblAngB = pushIn(B, centroid, 30);
+            const lblAngC = pushIn(C, centroid, 30);
+
+            const animClass = isAnimatingJS ? 'no-transition' : 'smooth-transition';
+            
+            const circumcenter = (showCircumcenter || isAnimatingJS) ? getCircumcenter(A, B, C) : null;
+            const circumRadius = circumcenter ? Math.hypot(A.x - circumcenter.x, A.y - circumcenter.y) : 0;
+
+            let rightAnglePath = "";
+            if (features.isRightA) {
+                const dAB = dir(A, B);
+                const dAC = dir(A, C);
+                const P1 = { x: A.x + 15 * dAB.x, y: A.y + 15 * dAB.y };
+                const P2 = { x: P1.x + 15 * dAC.x, y: P1.y + 15 * dAC.y };
+                const P3 = { x: A.x + 15 * dAC.x, y: A.y + 15 * dAC.y };
+                rightAnglePath = `M ${P1.x},${P1.y} L ${P2.x},${P2.y} L ${P3.x},${P3.y}`;
+            }
+
+            let svgContent = '';
+
+            // Path visualizer during rotation
+            if (isAnimatingJS && circumcenter) {
+                svgContent += `<circle cx="${circumcenter.x}" cy="${circumcenter.y}" r="${circumRadius}" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="6,6" opacity="0.4" />`;
+            }
+
+            // Fill Area
+            svgContent += `<polygon points="${A.x},${A.y} ${B.x},${B.y} ${C.x},${C.y}" fill="${fillColor}" stroke="none" class="${animClass}" />`;
+
+            // Right Angle Symbol
+            if (features.isRightA) {
+                const strokeColor = features.angA.h ? baseColor : `${baseColor}80`;
+                const strokeW = features.angA.h ? 3 : 1;
+                svgContent += `<path d="${rightAnglePath}" fill="none" stroke="${strokeColor}" stroke-width="${strokeW}" class="${animClass}" />`;
+            }
+
+            // Sides
+            const getSideProps = (h) => h ? `stroke-width="4" stroke-dasharray="none"` : `stroke-width="2" stroke-dasharray="6,6"`;
+            svgContent += `<line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="${baseColor}" ${getSideProps(features.sideAB.h)} stroke-linecap="round" class="${animClass}" />`;
+            svgContent += `<line x1="${B.x}" y1="${B.y}" x2="${C.x}" y2="${C.y}" stroke="${baseColor}" ${getSideProps(features.sideBC.h)} stroke-linecap="round" class="${animClass}" />`;
+            svgContent += `<line x1="${C.x}" y1="${C.y}" x2="${A.x}" y2="${A.y}" stroke="${baseColor}" ${getSideProps(features.sideCA.h)} stroke-linecap="round" class="${animClass}" />`;
+
+            // Labels
+            const renderText = (x, y, label, letter, dx) => {
+                let txt = `<text x="${x}" y="${y}" fill="${textColor}" font-size="14" font-weight="bold" text-anchor="middle" dominant-baseline="middle" class="${animClass}">${label}`;
+                if (showLetters && letter) {
+                    txt += `<tspan fill="#e11d48" dx="${dx}" font-size="18" font-weight="900">${letter}</tspan>`;
+                }
+                txt += `</text>`;
+                return txt;
+            };
+
+            if (features.sideAB.h) svgContent += renderText(lblAB.x, lblAB.y, Math.round(features.sideAB.label), features.sideAB.letter, 6);
+            if (features.sideBC.h) svgContent += renderText(lblBC.x, lblBC.y, Math.round(features.sideBC.label), features.sideBC.letter, 6);
+            if (features.sideCA.h) svgContent += renderText(lblCA.x, lblCA.y, Math.round(features.sideCA.label), features.sideCA.letter, 6);
+            
+            if ((!features.isRightA || showLetters) && features.angA.h) {
+                const labelTxt = !features.isRightA ? features.angA.label : '';
+                svgContent += renderText(lblAngA.x, lblAngA.y, labelTxt, features.angA.letter, features.isRightA ? 0 : 6);
+            }
+            if (features.angB.h) svgContent += renderText(lblAngB.x, lblAngB.y, features.angB.label, features.angB.letter, 6);
+            if (features.angC.h) svgContent += renderText(lblAngC.x, lblAngC.y, features.angC.label, features.angC.letter, 6);
+
+            // Vertices
+            svgContent += `<circle cx="${A.x}" cy="${A.y}" r="3" fill="${baseColor}" class="${animClass}" />`;
+            svgContent += `<circle cx="${B.x}" cy="${B.y}" r="3" fill="${baseColor}" class="${animClass}" />`;
+            svgContent += `<circle cx="${C.x}" cy="${C.y}" r="3" fill="${baseColor}" class="${animClass}" />`;
+
+            // Interactive Hitboxes
+            if (onSideClick) {
+                svgContent += `<g>
+                    <line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}" stroke="transparent" stroke-width="20" class="cursor-pointer hover:opacity-50" onclick="window.handleReflectTri2('AB')" />
+                    <line x1="${B.x}" y1="${B.y}" x2="${C.x}" y2="${C.y}" stroke="transparent" stroke-width="20" class="cursor-pointer hover:opacity-50" onclick="window.handleReflectTri2('BC')" />
+                    <line x1="${C.x}" y1="${C.y}" x2="${A.x}" y2="${A.y}" stroke="transparent" stroke-width="20" class="cursor-pointer hover:opacity-50" onclick="window.handleReflectTri2('CA')" />
+                </g>`;
+            }
+
+            if (showCircumcenter && circumcenter && onCircumcenterClick) {
+                svgContent += `<g>
+                    <circle cx="${circumcenter.x}" cy="${circumcenter.y}" r="6" fill="#8b5cf6" stroke="#fff" stroke-width="2" class="cursor-pointer hover:fill-purple-700 transition-colors ${animClass}" onclick="window.handleRotateTri2()">
+                        <title>Circumcenter - Click to rotate 120°</title>
+                    </circle>
+                </g>`;
+            }
+
+            return svgContent;
+        };
+
+        // --- DATA & STATE UPDATERS ---
+        const updateCalcData = () => {
+            const currentParams = state.params[state.activeTab];
+            state.calcData = buildTriangleData(state.activeTab, currentParams);
+        };
+
+        const resetTransformations = () => {
+            if (state.animRef) {
+                cancelAnimationFrame(state.animRef);
+                state.animRef = null;
+            }
+            state.isAnimatingJS = false;
+            state.tri2Verts = null;
+            state.overlapState = 'IDLE';
+        };
+
+        const getActiveT2Verts = () => {
+            if (state.mode === 'EXPLORER') {
+                return {
+                    A: state.tri2Verts ? state.tri2Verts.A : state.calcData.A,
+                    B: state.tri2Verts ? state.tri2Verts.B : state.calcData.B,
+                    C: state.tri2Verts ? state.tri2Verts.C : state.calcData.C
+                };
+            } else {
+                return state.quizTri2Verts || (state.quizQuestion ? { A: state.quizQuestion.t2A, B: state.quizQuestion.t2B, C: state.quizQuestion.t2C } : null);
+            }
+        };
+
+        // --- INTERACTIVITY HANDLERS ---
+        window.handleNav = (targetMode, diff = 'NORMAL') => {
+            if (targetMode === 'QUIZ') {
+                state.quizDifficulty = diff;
+                if (!state.userName.trim()) {
+                    state.mode = 'QUIZ_ENTRY';
+                } else {
+                    startQuiz();
+                }
+            } else {
+                state.mode = 'EXPLORER';
+                resetTransformations();
+            }
+            renderApp();
+        };
+
+        window.handleTabChange = (tabId) => {
+            state.activeTab = tabId;
+            resetTransformations();
+            updateCalcData();
+            renderApp();
+        };
+
+        window.handleSliderChange = (tab, key, valStr) => {
+            const val = Number(valStr);
+            state.params[tab][key] = val;
+            document.getElementById(`lbl-${tab}-${key}`).innerText = Math.round(val) + (key.includes('ang') ? '°' : '');
+            
+            resetTransformations();
+            updateCalcData();
+            updateExplorerCanvas();
+            updateProveButtonUI();
+        };
+
+        window.handleRotateTri2 = () => {
+            if (state.overlapState !== 'IDLE' || state.isAnimatingJS) return;
+            
+            state.isAnimatingJS = true;
+            const t2 = getActiveT2Verts();
+            const cc = getCircumcenter(t2.A, t2.B, t2.C);
+            
+            const startA = { ...t2.A };
+            const startB = { ...t2.B };
+            const startC = { ...t2.C };
+
+            const duration = 800; 
+            let startTime = null;
+
+            const animate = (time) => {
+                if (!startTime) startTime = time;
+                const elapsed = time - startTime;
+                const progress = Math.min(elapsed / duration, 1);
                 
-                {activeTab === 'SAS' && (
-                  <>
-                    <Slider label="Side 1 (Base)" value={paramsSAS.s1} min={80} max={250} onChange={(v) => setParamsSAS({...paramsSAS, s1: v})} />
-                    <Slider label="Included Angle" value={paramsSAS.ang} min={20} max={160} onChange={(v) => setParamsSAS({...paramsSAS, ang: v})} suffix="°" />
-                    <Slider label="Side 2 (Left)" value={paramsSAS.s2} min={80} max={250} onChange={(v) => setParamsSAS({...paramsSAS, s2: v})} />
-                  </>
-                )}
+                const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+                const currentAngle = ease * 120;
 
-                {activeTab === 'ASA' && (
-                  <>
-                    <Slider label="Angle 1 (Left)" value={paramsASA.ang1} min={20} max={120} onChange={(v) => setParamsASA({...paramsASA, ang1: v})} suffix="°" />
-                    <Slider label="Included Side (Base)" value={paramsASA.s} min={80} max={250} onChange={(v) => setParamsASA({...paramsASA, s: v})} />
-                    <Slider label="Angle 2 (Right)" value={paramsASA.ang2} min={20} max={120} onChange={(v) => setParamsASA({...paramsASA, ang2: v})} suffix="°" />
-                  </>
-                )}
+                state.tri2Verts = {
+                    A: rotatePoint(startA, cc, currentAngle),
+                    B: rotatePoint(startB, cc, currentAngle),
+                    C: rotatePoint(startC, cc, currentAngle),
+                };
 
-                {activeTab === 'AAS' && (
-                  <>
-                    <Slider label="Angle 1 (Left)" value={paramsAAS.ang1} min={20} max={120} onChange={(v) => setParamsAAS({...paramsAAS, ang1: v})} suffix="°" />
-                    <Slider label="Angle 2 (Right)" value={paramsAAS.ang2} min={20} max={120} onChange={(v) => setParamsAAS({...paramsAAS, ang2: v})} suffix="°" />
-                    <Slider label="Non-included Side" value={paramsAAS.s} min={80} max={250} onChange={(v) => setParamsAAS({...paramsAAS, s: v})} />
-                  </>
-                )}
+                updateExplorerCanvas();
 
-                {activeTab === 'RHS' && (
-                  <>
-                    <Slider label="Hypotenuse" value={paramsRHS.hyp} min={100} max={300} onChange={(v) => setParamsRHS({...paramsRHS, hyp: v})} />
-                    <Slider label="Leg (Base)" value={paramsRHS.leg} min={50} max={250} onChange={(v) => setParamsRHS({...paramsRHS, leg: v})} />
-                  </>
-                )}
-              </div>
-            </div>
+                if (progress < 1) {
+                    state.animRef = requestAnimationFrame(animate);
+                } else {
+                    state.isAnimatingJS = false;
+                    state.animRef = null;
+                    updateExplorerCanvas(); // One last update without animating class
+                }
+            };
+            
+            state.animRef = requestAnimationFrame(animate);
+        };
 
-            {/* Right Area - Canvas & Explanations */}
-            <div className="flex-1 flex flex-col gap-4">
-              
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
-                <div className="flex items-start gap-3">
-                  <Info className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <h3 className="font-semibold text-slate-800 text-lg">{CONDITIONS[activeTab].title}</h3>
-                    <p className="text-slate-600 mt-1">{CONDITIONS[activeTab].desc}</p>
-                    <p className="text-sm text-slate-500 mt-2 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                      <span className="font-medium text-slate-700">Why it works: </span> 
-                      {CONDITIONS[activeTab].details}
-                    </p>
-                  </div>
-                </div>
-              </div>
+        window.handleReflectTri2 = (side) => {
+            if (state.isAnimatingJS || state.overlapState !== 'IDLE') return;
+            const t2 = getActiveT2Verts();
+            let P1, P2;
+            if(side === 'AB') { P1 = t2.A; P2 = t2.B; }
+            if(side === 'BC') { P1 = t2.B; P2 = t2.C; }
+            if(side === 'CA') { P1 = t2.C; P2 = t2.A; }
 
-              <div className="relative bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex-1 min-h-[400px] flex flex-col">
+            state.tri2Verts = {
+                A: reflectPointAcrossBisector(t2.A, P1, P2),
+                B: reflectPointAcrossBisector(t2.B, P1, P2),
+                C: reflectPointAcrossBisector(t2.C, P1, P2),
+            };
+            updateExplorerCanvas();
+        };
+
+        // --- PROVE SEQUENCE ANIMATION ---
+        window.handleProveClick = () => {
+            const isBusy = state.overlapState === 'ROTATING' || state.overlapState === 'REFLECTING' || state.overlapState === 'SLIDING' || state.isAnimatingJS;
+            if (!state.calcData.valid || isBusy) return;
+
+            if (state.overlapState === 'IDLE') {
+                if (state.tri2Verts) {
+                    state.isAnimatingJS = true;
+                    
+                    const t2 = getActiveT2Verts();
+                    const startA = { ...t2.A };
+                    const startB = { ...t2.B };
+                    const startC = { ...t2.C };
+                    const targetA = { ...state.calcData.A };
+                    const targetB = { ...state.calcData.B };
+                    const targetC = { ...state.calcData.C };
+                    
+                    const CC0 = getCircumcenter(startA, startB, startC);
+                    const CCtgt = getCircumcenter(targetA, targetB, targetC);
+                    
+                    const theta0 = Math.atan2(startA.y - CC0.y, startA.x - CC0.x);
+                    const thetaTgt = Math.atan2(targetA.y - CCtgt.y, targetA.x - CCtgt.x);
+                    let deltaAngle = thetaTgt - theta0;
+                    while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
+                    while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
+                    
+                    const needsRotation = Math.abs(deltaAngle) > 0.01;
+                    const rotDuration = needsRotation ? 800 : 0;
+                    
+                    // Step 1: Rotation
+                    const doRotation = () => {
+                        if (!needsRotation) {
+                            doReflection(startA, startB, startC);
+                            return;
+                        }
+                        
+                        state.overlapState = 'ROTATING';
+                        updateProveButtonUI();
+                        let startTime = null;
+                        
+                        const animateRot = (time) => {
+                            if (!startTime) startTime = time;
+                            const elapsed = time - startTime;
+                            const progress = Math.min(elapsed / rotDuration, 1);
+                            const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+                            
+                            const currentAngleOffset = deltaAngle * ease * 180 / Math.PI;
+                            const curA = rotatePoint(startA, CC0, currentAngleOffset);
+                            const curB = rotatePoint(startB, CC0, currentAngleOffset);
+                            const curC = rotatePoint(startC, CC0, currentAngleOffset);
+                            
+                            state.tri2Verts = { A: curA, B: curB, C: curC };
+                            updateExplorerCanvas();
+                            
+                            if (progress < 1) {
+                                state.animRef = requestAnimationFrame(animateRot);
+                            } else {
+                                doReflection(curA, curB, curC);
+                            }
+                        };
+                        state.animRef = requestAnimationFrame(animateRot);
+                    };
+                    
+                    // Step 2: Reflection
+                    const doReflection = (rotA, rotB, rotC) => {
+                        const wRot = (rotB.x - rotA.x) * (rotC.y - rotA.y) - (rotB.y - rotA.y) * (rotC.x - rotA.x);
+                        const wTgt = (targetB.x - targetA.x) * (targetC.y - targetA.y) - (targetB.y - targetA.y) * (targetC.x - targetA.x);
+                        
+                        const needsReflection = (wRot * wTgt) < 0;
+                        const refDuration = needsReflection ? 800 : 0;
+                        
+                        if (!needsReflection) {
+                            doTranslation();
+                            return;
+                        }
+                        
+                        state.overlapState = 'REFLECTING';
+                        updateProveButtonUI();
+                        
+                        const targetRotB = reflectPointAcrossLine(rotB, CC0, rotA);
+                        const targetRotC = reflectPointAcrossLine(rotC, CC0, rotA);
+                        
+                        let startTime = null;
+                        const animateRef = (time) => {
+                            if (!startTime) startTime = time;
+                            const elapsed = time - startTime;
+                            const progress = Math.min(elapsed / refDuration, 1);
+                            const ease = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+                            
+                            state.tri2Verts = {
+                                A: rotA, 
+                                B: { x: rotB.x + (targetRotB.x - rotB.x) * ease, y: rotB.y + (targetRotB.y - rotB.y) * ease },
+                                C: { x: rotC.x + (targetRotC.x - rotC.x) * ease, y: rotC.y + (targetRotC.y - rotC.y) * ease }
+                            };
+                            updateExplorerCanvas();
+                            
+                            if (progress < 1) {
+                                state.animRef = requestAnimationFrame(animateRef);
+                            } else {
+                                doTranslation();
+                            }
+                        };
+                        state.animRef = requestAnimationFrame(animateRef);
+                    };
+                    
+                    // Step 3: Translation
+                    const doTranslation = () => {
+                        state.isAnimatingJS = false;
+                        state.animRef = null;
+                        state.tri2Verts = null; 
+                        state.overlapState = 'SLIDING';
+                        updateProveButtonUI();
+                        updateExplorerCanvas(); // The CSS transition handles the slide
+                        
+                        setTimeout(() => {
+                            state.overlapState = 'MATCHED';
+                            updateProveButtonUI();
+                            updateExplorerCanvas();
+                        }, 1000);
+                    };
+                    
+                    doRotation();
+
+                } else {
+                    state.overlapState = 'SLIDING';
+                    updateProveButtonUI();
+                    updateExplorerCanvas();
+                    setTimeout(() => {
+                        state.overlapState = 'MATCHED';
+                        updateProveButtonUI();
+                        updateExplorerCanvas();
+                    }, 1000);
+                }
+            } else {
+                // Reset
+                state.overlapState = 'IDLE';
+                updateProveButtonUI();
+                updateExplorerCanvas();
+            }
+        };
+
+        const getButtonText = () => {
+            if (state.overlapState === 'ROTATING') return 'Step 1: Aligning Angle...';
+            if (state.overlapState === 'REFLECTING') return 'Step 2: Flipping...';
+            if (state.overlapState === 'SLIDING') return 'Step 3: Translating...';
+            if (state.overlapState === 'MATCHED') return 'Separate Triangles';
+            return 'Prove Congruence (Overlap)';
+        };
+
+        // --- RENDERING ROUTINES ---
+        const renderNavButtons = () => {
+            const container = document.getElementById('nav-buttons');
+            container.innerHTML = `
+                <button onclick="window.handleNav('EXPLORER')" class="px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${state.mode === 'EXPLORER' ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}">Explorer</button>
+                <button onclick="window.handleNav('QUIZ', 'NORMAL')" class="px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${(state.mode === 'QUIZ' || state.mode === 'QUIZ_ENTRY') && state.quizDifficulty === 'NORMAL' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}">Quiz 1 (Normal)</button>
+                <button onclick="window.handleNav('QUIZ', 'HARD')" class="px-4 py-2 font-semibold rounded-lg transition-colors text-sm ${(state.mode === 'QUIZ' || state.mode === 'QUIZ_ENTRY') && state.quizDifficulty === 'HARD' ? 'bg-purple-100 text-purple-800' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}">Quiz 2 (Hard)</button>
+            `;
+        };
+
+        const renderApp = () => {
+            renderNavButtons();
+            const root = document.getElementById('app-root');
+            
+            if (state.mode === 'QUIZ_ENTRY') {
+                root.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center w-full">
+                        <div class="bg-white p-8 rounded-xl shadow-sm border border-slate-200 max-w-md w-full">
+                            <h2 class="text-2xl font-bold text-center mb-6">${state.quizDifficulty === 'NORMAL' ? 'Quiz 1 (Normal)' : 'Quiz 2 (Hard)'}</h2>
+                            <form id="quiz-entry-form" class="flex flex-col gap-4" onsubmit="window.submitQuizEntry(event)">
+                                <div>
+                                    <label class="block text-sm font-medium text-slate-700 mb-1">Enter your name:</label>
+                                    <input type="text" id="user-name-input" value="${state.userName}" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none" placeholder="E.g., Euclid" required />
+                                </div>
+                                <button type="submit" class="w-full text-white font-bold py-3 rounded-lg transition-colors shadow-sm mt-2 ${state.quizDifficulty === 'NORMAL' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-purple-600 hover:bg-purple-700'}">
+                                    Start ${state.quizDifficulty === 'NORMAL' ? 'Normal' : 'Hard'} Quiz
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                `;
+            } else if (state.mode === 'QUIZ' && state.quizQuestion) {
+                // Initialize quiz structure, inner canvas updated dynamically
+                root.innerHTML = `
+                    <div class="flex-1 flex flex-col gap-6 w-full">
+                        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center">
+                            <div class="font-semibold text-lg text-slate-700">Player: <span class="text-blue-600">${state.userName}</span> <span class="text-sm bg-slate-100 px-2 py-1 rounded ml-2">${state.quizDifficulty}</span></div>
+                            <div class="font-bold text-xl text-slate-800">Score: <span class="text-emerald-600" id="quiz-score-val">${state.score}</span> <span class="text-slate-400 font-normal text-lg">/ <span id="quiz-attempts-val">${state.attempts}</span></span></div>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 text-center flex flex-col items-center">
+                            <h3 class="text-xl font-bold mb-2">Which condition proves these triangles are congruent?</h3>
+                            <p class="text-slate-500 mb-6">Observe the highlighted sides and angles.</p>
+                            
+                            <div class="relative bg-slate-50 rounded-xl shadow-inner border border-slate-200 overflow-hidden w-full max-w-4xl min-h-[400px] flex flex-col mb-8" id="quiz-canvas-container">
+                                <!-- Canvas injected here -->
+                            </div>
+
+                            <div id="quiz-controls-container" class="w-full max-w-4xl">
+                                <!-- Controls injected here -->
+                            </div>
+                        </div>
+                    </div>
+                `;
+                updateQuizCanvas();
+            } else if (state.mode === 'EXPLORER') {
+                const cond = CONDITIONS[state.activeTab];
                 
-                {/* Interactive Header inside Canvas */}
-                <div className="absolute top-4 left-0 right-0 flex justify-center z-10">
-                  <button 
-                    onClick={handleProveClick}
-                    disabled={!calcData.valid || isBusy}
-                    className={`flex items-center gap-2 px-6 py-3 rounded-full font-bold shadow-lg transition-all ${
-                      !calcData.valid || isBusy
-                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                        : overlapState === 'MATCHED'
-                          ? 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-500/30' 
-                          : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/30'
-                    }`}
-                  >
-                    <Layers className={`w-5 h-5 ${isBusy ? 'animate-pulse' : ''}`} />
-                    {getButtonText()}
-                  </button>
+                root.innerHTML = `
+                    <!-- Left Sidebar - Controls -->
+                    <div class="w-full lg:w-80 flex flex-col gap-4 shrink-0">
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                            <div class="p-4 border-b border-slate-100 bg-slate-50/50">
+                                <h2 class="font-semibold flex items-center gap-2">
+                                    <i data-lucide="settings-2" class="w-4 h-4 text-slate-500"></i> Choose Condition
+                                </h2>
+                            </div>
+                            <div class="p-2 flex flex-col gap-1" id="tab-buttons">
+                                ${Object.values(CONDITIONS).map(c => `
+                                    <button onclick="window.handleTabChange('${c.id}')" class="text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors ${state.activeTab === c.id ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'text-slate-600 hover:bg-slate-50 border border-transparent'}">${c.title}</button>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col gap-5">
+                            <h3 class="font-semibold text-slate-800 border-b border-slate-100 pb-2">Adjust Parameters</h3>
+                            <div id="slider-container" class="flex flex-col gap-4">
+                                <!-- Sliders injected here -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Area - Canvas & Explanations -->
+                    <div class="flex-1 flex flex-col gap-4 min-w-0">
+                        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+                            <div class="flex items-start gap-3">
+                                <i data-lucide="info" class="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5"></i>
+                                <div>
+                                    <h3 class="font-semibold text-slate-800 text-lg">${cond.title}</h3>
+                                    <p class="text-slate-600 mt-1">${cond.desc}</p>
+                                    <p class="text-sm text-slate-500 mt-2 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                                        <span class="font-medium text-slate-700">Why it works: </span> 
+                                        ${cond.details}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="relative bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex-1 min-h-[400px] flex flex-col">
+                            <div class="absolute top-4 left-0 right-0 flex justify-center z-10">
+                                <button id="prove-btn" onclick="window.handleProveClick()" class="flex items-center gap-2 px-6 py-3 rounded-full font-bold shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/30">
+                                    <i data-lucide="layers" class="w-5 h-5"></i>
+                                    <span id="prove-btn-text">${getButtonText()}</span>
+                                </button>
+                            </div>
+                            
+                            <div id="explorer-canvas" class="relative flex-1 w-full bg-[#f8fafc] overflow-hidden" style="min-height: 400px;">
+                                <!-- Canvas injected here -->
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                renderSliders();
+                updateProveButtonUI();
+                updateExplorerCanvas();
+            }
+            
+            // Re-initialize icons
+            lucide.createIcons();
+        };
+
+        const renderSliders = () => {
+            const container = document.getElementById('slider-container');
+            if (!container) return;
+            
+            const tab = state.activeTab;
+            const p = state.params[tab];
+            let html = '';
+            
+            const makeSlider = (label, key, val, min, max, suffix='') => `
+                <div>
+                    <div class="flex justify-between text-sm mb-1.5">
+                        <label class="font-medium text-slate-700">${label}</label>
+                        <span class="text-blue-600 font-bold" id="lbl-${tab}-${key}">${Math.round(val)}${suffix}</span>
+                    </div>
+                    <input type="range" min="${min}" max="${max}" value="${val}" oninput="window.handleSliderChange('${tab}', '${key}', this.value)">
+                </div>
+            `;
+
+            if (tab === 'SSS') {
+                html += makeSlider('Side 1 (Base)', 'c', p.c, 80, 250);
+                html += makeSlider('Side 2 (Left)', 'b', p.b, 80, 250);
+                html += makeSlider('Side 3 (Right)', 'a', p.a, 80, 250);
+            } else if (tab === 'SAS') {
+                html += makeSlider('Side 1 (Base)', 's1', p.s1, 80, 250);
+                html += makeSlider('Included Angle', 'ang', p.ang, 20, 160, '°');
+                html += makeSlider('Side 2 (Left)', 's2', p.s2, 80, 250);
+            } else if (tab === 'ASA') {
+                html += makeSlider('Angle 1 (Left)', 'ang1', p.ang1, 20, 120, '°');
+                html += makeSlider('Included Side (Base)', 's', p.s, 80, 250);
+                html += makeSlider('Angle 2 (Right)', 'ang2', p.ang2, 20, 120, '°');
+            } else if (tab === 'AAS') {
+                html += makeSlider('Angle 1 (Left)', 'ang1', p.ang1, 20, 120, '°');
+                html += makeSlider('Angle 2 (Right)', 'ang2', p.ang2, 20, 120, '°');
+                html += makeSlider('Non-included Side', 's', p.s, 80, 250);
+            } else if (tab === 'RHS') {
+                html += makeSlider('Hypotenuse', 'hyp', p.hyp, 100, 300);
+                html += makeSlider('Leg (Base)', 'leg', p.leg, 50, 250);
+            }
+            container.innerHTML = html;
+        };
+
+        const updateProveButtonUI = () => {
+            const btn = document.getElementById('prove-btn');
+            const txt = document.getElementById('prove-btn-text');
+            if (!btn || !txt) return;
+
+            const isBusy = state.overlapState === 'ROTATING' || state.overlapState === 'REFLECTING' || state.overlapState === 'SLIDING' || state.isAnimatingJS;
+            
+            if (!state.calcData.valid || isBusy) {
+                btn.className = "flex items-center gap-2 px-6 py-3 rounded-full font-bold shadow-lg transition-all bg-slate-200 text-slate-400 cursor-not-allowed";
+                if(isBusy) btn.querySelector('i').classList.add('animate-pulse');
+            } else if (state.overlapState === 'MATCHED') {
+                btn.className = "flex items-center gap-2 px-6 py-3 rounded-full font-bold shadow-lg transition-all bg-orange-500 hover:bg-orange-600 text-white shadow-orange-500/30";
+                btn.querySelector('i').classList.remove('animate-pulse');
+            } else {
+                btn.className = "flex items-center gap-2 px-6 py-3 rounded-full font-bold shadow-lg transition-all bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/30";
+                btn.querySelector('i').classList.remove('animate-pulse');
+            }
+            txt.innerText = getButtonText();
+        };
+
+        const updateExplorerCanvas = () => {
+            const container = document.getElementById('explorer-canvas');
+            if (!container) return;
+
+            if (!state.calcData.valid) {
+                container.innerHTML = `
+                    <div class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm">
+                        <i data-lucide="alert-triangle" class="w-12 h-12 text-red-500 mb-3"></i>
+                        <h3 class="text-xl font-bold text-slate-800">Invalid Triangle Constraints</h3>
+                        <p class="text-slate-600 max-w-md text-center mt-2">The values you provided mathematically cannot form a closed triangle.</p>
+                    </div>
+                `;
+                lucide.createIcons({root: container});
+                return;
+            }
+
+            const isOverlapping = state.overlapState === 'SLIDING' || state.overlapState === 'MATCHED';
+            const t2 = getActiveT2Verts();
+
+            const svg1 = renderTriangleSVG(state.calcData, {
+                baseColor: "#3b82f6", fillColor: "rgba(59, 130, 246, 0.15)", textColor: "#1e3a8a",
+                showLetters: state.overlapState === 'MATCHED', isAnimatingJS: state.isAnimatingJS
+            });
+
+            const svg2 = renderTriangleSVG({ ...state.calcData, A: t2.A, B: t2.B, C: t2.C }, {
+                baseColor: "#f97316", fillColor: "rgba(249, 115, 22, 0.15)", textColor: "#9a3412",
+                showLetters: state.overlapState === 'MATCHED',
+                showCircumcenter: state.overlapState === 'IDLE',
+                isAnimatingJS: state.isAnimatingJS,
+                onCircumcenterClick: state.overlapState === 'IDLE',
+                onSideClick: state.overlapState === 'IDLE'
+            });
+
+            let html = `
+                <!-- Triangle 1 (Blue) -->
+                <div class="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out" style="left: ${isOverlapping ? '50%' : '20%'}; transform: translateX(-50%); width: 400px;">
+                    <svg viewBox="0 0 400 350" class="w-full h-full">${svg1}</svg>
+                    <div class="absolute bottom-4 left-0 right-0 text-center font-semibold text-blue-700 opacity-70">Triangle 1</div>
                 </div>
 
-                {/* SVG Canvas Area */}
-                <div className="relative flex-1 w-full bg-[#f8fafc] overflow-hidden" style={{ minHeight: '400px' }}>
-                  
-                  {!calcData.valid && (
-                    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm">
-                      <AlertTriangle className="w-12 h-12 text-red-500 mb-3" />
-                      <h3 className="text-xl font-bold text-slate-800">Invalid Triangle Constraints</h3>
-                      <p className="text-slate-600 max-w-md text-center mt-2">
-                        The values you provided mathematically cannot form a closed triangle (e.g., sides are too short to connect, or angles exceed 180°).
-                      </p>
+                <!-- Triangle 2 (Orange) -->
+                <div class="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out" style="left: ${isOverlapping ? '50%' : '80%'}; transform: translateX(-50%); width: 400px; mix-blend-mode: ${isOverlapping ? 'multiply' : 'normal'};">
+                    <svg viewBox="0 0 400 350" class="w-full h-full">${svg2}</svg>
+                    <div class="absolute bottom-4 left-0 right-0 flex flex-col items-center transition-opacity ${isOverlapping ? 'opacity-0' : 'opacity-100'}">
+                        <span class="font-semibold text-orange-600 opacity-70">Triangle 2</span>
+                        ${!isOverlapping ? '<span class="text-xs text-slate-500 mt-1 bg-white/60 px-2 py-0.5 rounded-md pointer-events-none">Click center to rotate • Click sides to flip</span>' : ''}
                     </div>
-                  )}
-
-                  {/* Triangle 1 (Blue) */}
-                  <div 
-                    className="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out"
-                    style={{ 
-                      left: isOverlapping ? '50%' : '20%', 
-                      transform: 'translateX(-50%)',
-                      width: '400px'
-                    }}
-                  >
-                    <svg viewBox="0 0 400 350" className="w-full h-full">
-                      <TriangleRenderer 
-                        data={calcData} 
-                        baseColor="#3b82f6" 
-                        fillColor="rgba(59, 130, 246, 0.15)"
-                        textColor="#1e3a8a"
-                        showLetters={overlapState === 'MATCHED'}
-                      />
-                    </svg>
-                    <div className="absolute bottom-4 left-0 right-0 text-center font-semibold text-blue-700 opacity-70">
-                      Triangle 1
-                    </div>
-                  </div>
-
-                  {/* Triangle 2 (Orange) */}
-                  <div 
-                    className="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out"
-                    style={{ 
-                      left: isOverlapping ? '50%' : '80%',
-                      transform: 'translateX(-50%)',
-                      width: '400px',
-                      mixBlendMode: isOverlapping ? 'multiply' : 'normal'
-                    }}
-                  >
-                    <svg viewBox="0 0 400 350" className="w-full h-full">
-                      <TriangleRenderer 
-                        data={{ ...calcData, A: t2A, B: t2B, C: t2C }} 
-                        baseColor="#f97316" 
-                        fillColor="rgba(249, 115, 22, 0.15)"
-                        textColor="#9a3412"
-                        onCircumcenterClick={overlapState === 'IDLE' ? handleRotateTri2 : undefined}
-                        onSideClick={overlapState === 'IDLE' ? handleReflectTri2 : undefined}
-                        showCircumcenter={overlapState === 'IDLE'}
-                        isAnimatingJS={isAnimatingJS}
-                        showLetters={overlapState === 'MATCHED'}
-                      />
-                    </svg>
-                    <div className={`absolute bottom-4 left-0 right-0 flex flex-col items-center transition-opacity ${isOverlapping ? 'opacity-0' : 'opacity-100'}`}>
-                      <span className="font-semibold text-orange-600 opacity-70">Triangle 2</span>
-                      {!isOverlapping && calcData.valid && (
-                        <span className="text-xs text-slate-500 mt-1 bg-white/60 px-2 py-0.5 rounded-md pointer-events-none">
-                          Click center to rotate • Click sides to flip
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Success message when matched */}
-                  <div className={`absolute top-20 left-0 right-0 flex justify-center z-10 transition-all duration-700 ${overlapState === 'MATCHED' ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
-                     <div className="bg-emerald-100 text-emerald-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-sm border border-emerald-200">
-                        <CheckCircle2 className="w-5 h-5" />
-                        Perfect Match! Triangles are congruent.
-                     </div>
-                  </div>
-
                 </div>
-              </div>
 
-            </div>
-          </>
-        )}
-      </main>
-    </div>
-  );
-}
+                <!-- Match Overlay -->
+                <div class="absolute top-20 left-0 right-0 flex justify-center z-10 transition-all duration-700 ${state.overlapState === 'MATCHED' ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}">
+                    <div class="bg-emerald-100 text-emerald-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-sm border border-emerald-200">
+                        <i data-lucide="check-circle-2" class="w-5 h-5"></i> Perfect Match! Triangles are congruent.
+                    </div>
+                </div>
+            `;
+            
+            container.innerHTML = html;
+            lucide.createIcons({root: container});
+        };
 
-// Reusable Slider Component
-function Slider({ label, value, min, max, onChange, suffix = '' }) {
-  return (
-    <div>
-      <div className="flex justify-between text-sm mb-1.5">
-        <label className="font-medium text-slate-700">{label}</label>
-        <span className="text-blue-600 font-bold">{Math.round(value)}{suffix}</span>
-      </div>
-      <input 
-        type="range" 
-        min={min} 
-        max={max} 
-        value={value} 
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-      />
-    </div>
-  );
-}
+        const updateQuizCanvas = () => {
+            const container = document.getElementById('quiz-canvas-container');
+            const controls = document.getElementById('quiz-controls-container');
+            if (!container || !controls || !state.quizQuestion) return;
 
-// Pure SVG Triangle Renderer
-function TriangleRenderer({ data, baseColor, fillColor, textColor, onCircumcenterClick, onSideClick, showCircumcenter, isAnimatingJS, showLetters }) {
-  if (!data.valid) return null;
+            const isQuizOverlapping = state.quizOverlapState === 'SLIDING' || state.quizOverlapState === 'MATCHED';
+            const qT2Verts = getActiveT2Verts();
 
-  const { A, B, C, features } = data;
+            const svg1 = renderTriangleSVG(state.quizQuestion.data1, {
+                baseColor: "#3b82f6", fillColor: "rgba(59, 130, 246, 0.15)", textColor: "#1e3a8a",
+                showLetters: state.quizOverlapState === 'MATCHED' && state.quizQuestion.isCongruent, isAnimatingJS: state.isAnimatingJS
+            });
 
-  // Math for positioning labels
-  const midAB = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-  const midBC = { x: (B.x + C.x) / 2, y: (B.y + C.y) / 2 };
-  const midCA = { x: (C.x + A.x) / 2, y: (C.y + A.y) / 2 };
-  const centroid = { x: (A.x + B.x + C.x) / 3, y: (A.y + B.y + C.y) / 3 };
+            const svg2 = renderTriangleSVG({ ...state.quizQuestion.data2, A: qT2Verts.A, B: qT2Verts.B, C: qT2Verts.C }, {
+                baseColor: "#f97316", fillColor: "rgba(249, 115, 22, 0.15)", textColor: "#9a3412",
+                showLetters: state.quizOverlapState === 'MATCHED' && state.quizQuestion.isCongruent, isAnimatingJS: state.isAnimatingJS
+            });
 
-  const lblAB = pushOut(midAB, centroid, 20);
-  const lblBC = pushOut(midBC, centroid, 20);
-  const lblCA = pushOut(midCA, centroid, 20);
-  
-  const lblAngA = pushIn(A, centroid, 30);
-  const lblAngB = pushIn(B, centroid, 30);
-  const lblAngC = pushIn(C, centroid, 30);
+            let overlayMsg = '';
+            if (state.quizOverlapState !== 'IDLE' && state.quizOverlapState !== 'MATCHED') {
+                const txt = state.quizOverlapState === 'ROTATING' ? 'Step 1: Aligning Angle...' : state.quizOverlapState === 'REFLECTING' ? 'Step 2: Flipping...' : 'Step 3: Translating to overlap...';
+                overlayMsg = `
+                    <div class="absolute top-4 left-0 right-0 flex justify-center z-10 pointer-events-none">
+                        <div class="bg-white/90 backdrop-blur px-6 py-2 rounded-full font-bold text-blue-700 shadow-sm border border-blue-100 flex items-center gap-2">
+                            <i data-lucide="layers" class="w-5 h-5 animate-pulse"></i> ${txt}
+                        </div>
+                    </div>`;
+            }
 
-  // Disable CSS transitions during JS rotation loop to prevent visual stuttering
-  const animStyle = isAnimatingJS ? {} : { transition: 'all 0.5s ease-in-out' };
-  
-  const circumcenter = (showCircumcenter || isAnimatingJS) ? getCircumcenter(A, B, C) : null;
-  const circumRadius = circumcenter ? Math.hypot(A.x - circumcenter.x, A.y - circumcenter.y) : 0;
+            let resultOverlay = '';
+            if (state.quizOverlapState === 'MATCHED') {
+                if (state.quizQuestion.isCongruent) {
+                    resultOverlay = `
+                    <div class="absolute top-4 left-0 right-0 flex justify-center z-10 transition-all duration-700 opacity-100 translate-y-0">
+                        <div class="bg-emerald-100 text-emerald-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-lg border border-emerald-200">
+                            <i data-lucide="check-circle-2" class="w-5 h-5"></i> Matched! Triangles are congruent.
+                        </div>
+                    </div>`;
+                } else {
+                    resultOverlay = `
+                    <div class="absolute top-4 left-0 right-0 flex justify-center z-10 transition-all duration-700 opacity-100 translate-y-0">
+                        <div class="bg-red-100 text-red-800 px-6 py-3 rounded-full font-bold flex items-center gap-2 shadow-lg border border-red-200">
+                            <i data-lucide="alert-triangle" class="w-5 h-5"></i> Mismatched! Triangles are NOT congruent.
+                        </div>
+                    </div>`;
+                }
+            }
 
-  let rightAnglePath = "";
-  if (features.isRightA) {
-    const dAB = dir(A, B);
-    const dAC = dir(A, C);
-    const P1 = { x: A.x + 15 * dAB.x, y: A.y + 15 * dAB.y };
-    const P2 = { x: P1.x + 15 * dAC.x, y: P1.y + 15 * dAC.y };
-    const P3 = { x: A.x + 15 * dAC.x, y: A.y + 15 * dAC.y };
-    rightAnglePath = `M ${P1.x},${P1.y} L ${P2.x},${P2.y} L ${P3.x},${P3.y}`;
-  }
+            container.innerHTML = `
+                ${overlayMsg}
+                <div class="relative flex-1 w-full overflow-hidden" style="min-height: 400px;">
+                    <div class="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out" style="left: ${isQuizOverlapping ? '50%' : '20%'}; transform: translateX(-50%); width: 400px;">
+                        <svg viewBox="0 0 400 350" class="w-full h-full">${svg1}</svg>
+                        <div class="absolute bottom-4 left-0 right-0 text-center font-semibold text-blue-700 opacity-70">Triangle 1</div>
+                    </div>
+                    <div class="absolute top-0 bottom-0 transition-all duration-1000 ease-in-out" style="left: ${isQuizOverlapping ? '50%' : '80%'}; transform: translateX(-50%); width: 400px; mix-blend-mode: ${isQuizOverlapping ? 'multiply' : 'normal'};">
+                        <svg viewBox="0 0 400 350" class="w-full h-full">${svg2}</svg>
+                        <div class="absolute bottom-4 left-0 right-0 text-center font-semibold text-orange-600 transition-opacity ${isQuizOverlapping ? 'opacity-0' : 'opacity-70'}">Triangle 2</div>
+                    </div>
+                    ${resultOverlay}
+                </div>
+            `;
 
-  return (
-    <g>
-      {/* Path visualizer during rotation */}
-      {isAnimatingJS && circumcenter && (
-         <circle cx={circumcenter.x} cy={circumcenter.y} r={circumRadius} fill="none" stroke="#8b5cf6" strokeWidth="1.5" strokeDasharray="6,6" opacity="0.4" />
-      )}
+            // Render Controls
+            if (state.quizFeedback) {
+                const fbClass = state.quizFeedback.isCorrect ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-red-100 text-red-800 border-red-200';
+                let btns = '';
+                if (state.quizOverlapState === 'MATCHED' && !state.quizFeedback.isCorrect) {
+                    btns = `
+                        <div class="flex flex-wrap justify-center gap-3 mt-4">
+                            <button onclick="window.triggerQuizAnimation(false, true)" class="px-6 py-3 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-lg transition-colors flex items-center gap-2"><i data-lucide="refresh-cw" class="w-5 h-5"></i> Replay Animation</button>
+                            <button onclick="window.handleNextQuestion()" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition-colors shadow-sm flex items-center gap-2">Next Question <i data-lucide="arrow-right" class="w-5 h-5"></i></button>
+                        </div>
+                    `;
+                }
+                controls.innerHTML = `
+                    <div class="flex flex-col gap-4 w-full">
+                        <div class="p-4 rounded-lg font-bold text-lg border ${fbClass}">${state.quizFeedback.text}</div>
+                        ${btns}
+                    </div>
+                `;
+            } else {
+                const ansOptions = ['SSS', 'SAS', 'ASA', 'AAS', 'RHS'];
+                if (state.quizDifficulty === 'HARD') ansOptions.push('Not Congruent');
+                
+                const buttons = ansOptions.map(ans => {
+                    const btnClass = ans === 'Not Congruent' ? 'bg-purple-100 hover:bg-purple-200 text-purple-800' : 'bg-blue-100 hover:bg-blue-200 text-blue-800';
+                    const disabledStr = state.quizOverlapState !== 'IDLE' ? 'disabled class="px-6 py-3 font-bold rounded-lg transition-colors min-w-[100px] opacity-50 cursor-not-allowed bg-slate-200 text-slate-500"' : `class="px-6 py-3 font-bold rounded-lg transition-colors min-w-[100px] ${btnClass}"`;
+                    return `<button onclick="window.handleQuizAnswer('${ans}')" ${disabledStr}>${ans}</button>`;
+                }).join('');
+                
+                controls.innerHTML = `<div class="flex flex-wrap justify-center gap-3">${buttons}</div>`;
+            }
+            lucide.createIcons({root: container});
+            lucide.createIcons({root: controls});
+        };
 
-      {/* Fill Area */}
-      <polygon 
-        points={`${A.x},${A.y} ${B.x},${B.y} ${C.x},${C.y}`} 
-        fill={fillColor} 
-        stroke="none"
-        style={animStyle}
-      />
 
-      {/* Right Angle Symbol at A */}
-      {features.isRightA && (
-        <path 
-          d={rightAnglePath} 
-          fill="none" 
-          stroke={features.angA.h ? baseColor : `${baseColor}80`} 
-          strokeWidth={features.angA.h ? 3 : 1} 
-          style={animStyle}
-        />
-      )}
+        // --- QUIZ HANDLERS ---
+        window.submitQuizEntry = (e) => {
+            e.preventDefault();
+            const input = document.getElementById('user-name-input');
+            if(input) state.userName = input.value;
+            if (!state.userName.trim()) {
+                alert("Please enter your name first!");
+                return;
+            }
+            startQuiz();
+            renderApp();
+        };
 
-      {/* Side AB */}
-      <line 
-        x1={A.x} y1={A.y} x2={B.x} y2={B.y} 
-        stroke={baseColor} 
-        strokeWidth={features.sideAB.h ? 4 : 2}
-        strokeDasharray={features.sideAB.h ? "none" : "6,6"}
-        strokeLinecap="round"
-        style={animStyle}
-      />
-      
-      {/* Side BC */}
-      <line 
-        x1={B.x} y1={B.y} x2={C.x} y2={C.y} 
-        stroke={baseColor} 
-        strokeWidth={features.sideBC.h ? 4 : 2}
-        strokeDasharray={features.sideBC.h ? "none" : "6,6"}
-        strokeLinecap="round"
-        style={animStyle}
-      />
+        const startQuiz = () => {
+            state.score = 0;
+            state.attempts = 0;
+            state.quizOverlapState = 'IDLE';
+            state.quizTri2Verts = null;
+            state.quizFeedback = null;
+            state.quizQuestion = generateQuizQuestion(state.quizDifficulty);
+            state.mode = 'QUIZ';
+        };
 
-      {/* Side CA */}
-      <line 
-        x1={C.x} y1={C.y} x2={A.x} y2={A.y} 
-        stroke={baseColor} 
-        strokeWidth={features.sideCA.h ? 4 : 2}
-        strokeDasharray={features.sideCA.h ? "none" : "6,6"}
-        strokeLinecap="round"
-        style={animStyle}
-      />
+        window.handleNextQuestion = () => {
+            state.quizQuestion = generateQuizQuestion(state.quizDifficulty);
+            state.quizFeedback = null;
+            state.quizOverlapState = 'IDLE';
+            state.quizTri2Verts = null;
+            updateQuizCanvas();
+        };
 
-      {/* Labels */}
-      {features.sideAB.h && (
-        <text x={lblAB.x} y={lblAB.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {Math.round(features.sideAB.label)}
-          {showLetters && features.sideAB.letter && (
-            <tspan fill="#e11d48" dx="6" fontSize="18" fontWeight="900">{features.sideAB.letter}</tspan>
-          )}
-        </text>
-      )}
-      {features.sideBC.h && (
-        <text x={lblBC.x} y={lblBC.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {Math.round(features.sideBC.label)}
-          {showLetters && features.sideBC.letter && (
-            <tspan fill="#e11d48" dx="6" fontSize="18" fontWeight="900">{features.sideBC.letter}</tspan>
-          )}
-        </text>
-      )}
-      {features.sideCA.h && (
-        <text x={lblCA.x} y={lblCA.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {Math.round(features.sideCA.label)}
-          {showLetters && features.sideCA.letter && (
-            <tspan fill="#e11d48" dx="6" fontSize="18" fontWeight="900">{features.sideCA.letter}</tspan>
-          )}
-        </text>
-      )}
-      
-      {(!features.isRightA || showLetters) && features.angA.h && (
-        <text x={lblAngA.x} y={lblAngA.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {!features.isRightA ? features.angA.label : ''}
-          {showLetters && features.angA.letter && (
-            <tspan fill="#e11d48" dx={features.isRightA ? 0 : 6} fontSize="18" fontWeight="900">{features.angA.letter}</tspan>
-          )}
-        </text>
-      )}
-      {features.angB.h && (
-        <text x={lblAngB.x} y={lblAngB.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {features.angB.label}
-          {showLetters && features.angB.letter && (
-            <tspan fill="#e11d48" dx="6" fontSize="18" fontWeight="900">{features.angB.letter}</tspan>
-          )}
-        </text>
-      )}
-      {features.angC.h && (
-        <text x={lblAngC.x} y={lblAngC.y} fill={textColor} fontSize="14" fontWeight="bold" textAnchor="middle" dominantBaseline="middle" style={animStyle}>
-          {features.angC.label}
-          {showLetters && features.angC.letter && (
-            <tspan fill="#e11d48" dx="6" fontSize="18" fontWeight="900">{features.angC.letter}</tspan>
-          )}
-        </text>
-      )}
-      
-      {/* Vertices indicator dots */}
-      <circle cx={A.x} cy={A.y} r="3" fill={baseColor} style={animStyle} />
-      <circle cx={B.x} cy={B.y} r="3" fill={baseColor} style={animStyle} />
-      <circle cx={C.x} cy={C.y} r="3" fill={baseColor} style={animStyle} />
+        window.triggerQuizAnimation = (autoAdvance, isReplay = false) => {
+            if (isReplay) {
+                state.quizOverlapState = 'IDLE';
+                state.quizTri2Verts = null;
+                updateQuizCanvas();
+                setTimeout(() => {
+                    window.triggerQuizAnimation(autoAdvance, false);
+                }, 1000);
+                return;
+            }
 
-      {/* Interactive Hitboxes & Elements */}
-      {onSideClick && (
-        <g>
-          <line x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke="transparent" strokeWidth="20" className="cursor-pointer hover:opacity-50" onClick={() => onSideClick('AB', A, B)} />
-          <line x1={B.x} y1={B.y} x2={C.x} y2={C.y} stroke="transparent" strokeWidth="20" className="cursor-pointer hover:opacity-50" onClick={() => onSideClick('BC', B, C)} />
-          <line x1={C.x} y1={C.y} x2={A.x} y2={A.y} stroke="transparent" strokeWidth="20" className="cursor-pointer hover:opacity-50" onClick={() => onSideClick('CA', C, A)} />
-        </g>
-      )}
+            state.quizOverlapState = 'TRANSFORMING';
+            state.isAnimatingJS = true;
+            updateQuizCanvas();
+            
+            const startA = { ...state.quizQuestion.t2A };
+            const startB = { ...state.quizQuestion.t2B };
+            const startC = { ...state.quizQuestion.t2C };
+            
+            const targetA = { ...state.quizQuestion.data2.A };
+            const targetB = { ...state.quizQuestion.data2.B };
+            const targetC = { ...state.quizQuestion.data2.C };
+            
+            const CC0 = getCircumcenter(startA, startB, startC);
+            const CCtgt = getCircumcenter(targetA, targetB, targetC);
+            
+            const theta0 = Math.atan2(startA.y - CC0.y, startA.x - CC0.x);
+            const thetaTgt = Math.atan2(targetA.y - CCtgt.y, targetA.x - CCtgt.x);
+            let deltaAngle = thetaTgt - theta0;
+            while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
+            while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
+            
+            const needsRotation = Math.abs(deltaAngle) > 0.01;
+            const rotDuration = needsRotation ? 700 : 0;
+            
+            const doRotation = () => {
+                if (!needsRotation) {
+                    doReflection(startA, startB, startC);
+                    return;
+                }
+                state.quizOverlapState = 'ROTATING';
+                updateQuizCanvas();
+                let startTime = null;
+                const animateRot = (time) => {
+                    if (!startTime) startTime = time;
+                    const elapsed = time - startTime;
+                    const progress = Math.min(elapsed / rotDuration, 1);
+                    const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+                    
+                    const currentAngleOffset = deltaAngle * ease * 180 / Math.PI;
+                    const curA = rotatePoint(startA, CC0, currentAngleOffset);
+                    const curB = rotatePoint(startB, CC0, currentAngleOffset);
+                    const curC = rotatePoint(startC, CC0, currentAngleOffset);
+                    
+                    state.quizTri2Verts = { A: curA, B: curB, C: curC };
+                    updateQuizCanvas();
+                    
+                    if (progress < 1) {
+                        state.animRef = requestAnimationFrame(animateRot);
+                    } else {
+                        doReflection(curA, curB, curC);
+                    }
+                };
+                state.animRef = requestAnimationFrame(animateRot);
+            };
+            
+            const doReflection = (rotA, rotB, rotC) => {
+                const wRot = (rotB.x - rotA.x) * (rotC.y - rotA.y) - (rotB.y - rotA.y) * (rotC.x - rotA.x);
+                const wTgt = (targetB.x - targetA.x) * (targetC.y - targetA.y) - (targetB.y - targetA.y) * (targetC.x - targetA.x);
+                const needsReflection = (wRot * wTgt) < 0;
+                const refDuration = needsReflection ? 700 : 0;
+                
+                if (!needsReflection) {
+                    doTranslation(rotA, rotB, rotC);
+                    return;
+                }
+                state.quizOverlapState = 'REFLECTING';
+                updateQuizCanvas();
+                const targetRotB = reflectPointAcrossLine(rotB, CC0, rotA);
+                const targetRotC = reflectPointAcrossLine(rotC, CC0, rotA);
+                
+                let startTime = null;
+                const animateRef = (time) => {
+                    if (!startTime) startTime = time;
+                    const elapsed = time - startTime;
+                    const progress = Math.min(elapsed / refDuration, 1);
+                    const ease = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+                    
+                    state.quizTri2Verts = {
+                        A: rotA,
+                        B: { x: rotB.x + (targetRotB.x - rotB.x) * ease, y: rotB.y + (targetRotB.y - rotB.y) * ease },
+                        C: { x: rotC.x + (targetRotC.x - rotC.x) * ease, y: rotC.y + (targetRotC.y - rotC.y) * ease }
+                    };
+                    updateQuizCanvas();
+                    
+                    if (progress < 1) {
+                        state.animRef = requestAnimationFrame(animateRef);
+                    } else {
+                        doTranslation(rotA, targetRotB, targetRotC);
+                    }
+                };
+                state.animRef = requestAnimationFrame(animateRef);
+            };
+            
+            const doTranslation = (currentA, currentB, currentC) => {
+                state.isAnimatingJS = true;
+                state.quizOverlapState = 'SLIDING';
+                updateQuizCanvas();
+                
+                const transTargetA = { ...state.quizQuestion.data2.A };
+                const transTargetB = { ...state.quizQuestion.data2.B };
+                const transTargetC = { ...state.quizQuestion.data2.C };
+                
+                const transDuration = 1000;
+                let startTime = null;
+                
+                const animateTrans = (time) => {
+                    if (!startTime) startTime = time;
+                    const elapsed = time - startTime;
+                    const progress = Math.min(elapsed / transDuration, 1);
+                    const ease = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+                    
+                    state.quizTri2Verts = {
+                        A: { x: currentA.x + (transTargetA.x - currentA.x) * ease, y: currentA.y + (transTargetA.y - currentA.y) * ease },
+                        B: { x: currentB.x + (transTargetB.x - currentB.x) * ease, y: currentB.y + (transTargetB.y - currentB.y) * ease },
+                        C: { x: currentC.x + (transTargetC.x - currentC.x) * ease, y: currentC.y + (transTargetC.y - currentC.y) * ease }
+                    };
+                    updateQuizCanvas();
+                    
+                    if (progress < 1) {
+                        state.animRef = requestAnimationFrame(animateTrans);
+                    } else {
+                        state.isAnimatingJS = false;
+                        state.animRef = null;
+                        state.quizOverlapState = 'MATCHED';
+                        updateQuizCanvas();
+                        
+                        if (autoAdvance) {
+                            setTimeout(() => {
+                                window.handleNextQuestion();
+                            }, 2000);
+                        }
+                    }
+                };
+                state.animRef = requestAnimationFrame(animateTrans);
+            };
+            
+            doRotation();
+        };
 
-      {showCircumcenter && circumcenter && (
-        <g>
-          <circle 
-            cx={circumcenter.x} 
-            cy={circumcenter.y} 
-            r="6" 
-            fill="#8b5cf6" 
-            stroke="#fff" 
-            strokeWidth="2" 
-            className="cursor-pointer hover:fill-purple-700 transition-colors" 
-            onClick={onCircumcenterClick}
-            style={animStyle}
-          >
-            <title>Circumcenter - Click to rotate 120°</title>
-          </circle>
-        </g>
-      )}
-    </g>
-  );
-}
+        window.handleQuizAnswer = (ans) => {
+            if (state.quizFeedback || state.isAnimatingJS) return;
+            state.attempts++;
+            const isCorrect = ans === state.quizQuestion.answer;
+            if (isCorrect) {
+                state.score++;
+                state.quizFeedback = { isCorrect: true, text: `Correct! The condition is ${ans}.` };
+            } else {
+                state.quizFeedback = { isCorrect: false, text: `Incorrect. The correct condition was ${state.quizQuestion.answer}.` };
+            }
+            
+            // Re-render score directly if possible to avoid full canvas flash
+            const scoreEl = document.getElementById('quiz-score-val');
+            const attEl = document.getElementById('quiz-attempts-val');
+            if(scoreEl) scoreEl.innerText = state.score;
+            if(attEl) attEl.innerText = state.attempts;
+            
+            updateQuizCanvas();
+            window.triggerQuizAnimation(isCorrect, false);
+            
+            // Automatically save data to Google Sheets after every answered question
+            autoSaveScore();
+        };
+
+        window.autoSaveScore = () => {
+            const scriptURL = "https://script.google.com/macros/s/AKfycbwFMKOLJ-Wf6ITtCRHxPNDK4RHFEYUhblSLiJ8eUoShCe46hPPZ6KStJ30Jhi_TFLc/exec"; 
+            
+            const payload = {
+                name: state.userName,
+                mode: state.quizDifficulty,
+                score: state.score,
+                attempts: state.attempts
+            };
+
+            fetch(scriptURL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json())
+            .then(data => console.log('Continuous save successful:', data))
+            .catch(error => console.error('Continuous save error:', error));
+        };
+
+        // --- INITIALIZATION ---
+        window.onload = () => {
+            updateCalcData();
+            renderApp();
+        };
+    </script>
+</body>
+</html>
